@@ -111,8 +111,8 @@ class CMW500MainWindow(QMainWindow):
         # ----- 顶部：接口配置 + 测试项配置 水平排列 -----
         top_layout = QHBoxLayout()
         top_layout.setSpacing(8)
-        top_layout.addWidget(self._create_interface_group(), stretch=2)
-        top_layout.addWidget(self._create_test_items_group(), stretch=3)
+        top_layout.addWidget(self._create_interface_group(), stretch=1)
+        top_layout.addWidget(self._create_test_items_group(), stretch=4)
         main_layout.addLayout(top_layout)
 
         # ----- 按钮操作区 -----

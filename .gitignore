@@ -1,0 +1,33 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyInstaller 构建产物
+build/
+dist/
+
+# 测试结果输出
+test_results/
+*.xlsx
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# 打包临时文件
+*.zip
+*.spec.bak
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# Qoder
+.qoder/
+.aicoding-chat-workspace
