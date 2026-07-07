@@ -1,12 +1,14 @@
 @echo off
 chcp 65001 >nul
+cls
 echo ============================================
-echo   CMW500 BLE TX Test Tool - Build EXE
+echo   CMW500 BLE Test Tool - Build EXE
 echo ============================================
 echo.
 
 REM Project directory
 set "PROJECT_DIR=%~dp0"
+set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
 
 REM Try to find Python
 set PYTHON_CMD=
@@ -57,9 +59,24 @@ echo [INFO] Python: %PYTHON_CMD%
 %PYTHON_CMD% --version
 echo.
 
+REM Check PyInstaller
+echo [Step 0/4] Checking PyInstaller...
+%PYTHON_CMD% -c "import PyInstaller" >nul 2>&1
+if errorlevel 1 (
+    echo [INFO] PyInstaller not found, installing...
+    %PYTHON_CMD% -m pip install pyinstaller
+    if errorlevel 1 (
+        echo [ERROR] Failed to install PyInstaller
+        pause
+        exit /b 1
+    )
+)
+echo [OK] PyInstaller is ready.
+echo.
+
 REM Install dependencies
-echo [Step 1/3] Installing dependencies...
-%PYTHON_CMD% -m pip install -r "%PROJECT_DIR%requirements.txt"
+echo [Step 1/4] Installing dependencies...
+%PYTHON_CMD% -m pip install -r "%PROJECT_DIR%\requirements.txt"
 if errorlevel 1 (
     echo [ERROR] Failed to install dependencies
     pause
@@ -67,15 +84,28 @@ if errorlevel 1 (
 )
 echo.
 
+REM Syntax check
+echo [Step 2/4] Syntax check...
+%PYTHON_CMD% -m py_compile "%PROJECT_DIR%\main.py" "%PROJECT_DIR%\gui_main.py" "%PROJECT_DIR%\test_executor.py" "%PROJECT_DIR%\data_exporter.py" "%PROJECT_DIR%\instrument_connection.py"
+if errorlevel 1 (
+    echo [ERROR] Syntax check failed, please fix the errors above.
+    pause
+    exit /b 1
+)
+echo [OK] Syntax check passed.
+echo.
+
 REM Clean old build
 cd /d "%PROJECT_DIR%"
+echo [Step 3/4] Cleaning old build directories...
 if exist dist rmdir /S /Q dist
 if exist build rmdir /S /Q build
-
-REM Build exe with PyInstaller (no spec file, direct command)
-echo [Step 2/3] Building exe...
+echo [OK] Cleaned.
 echo.
-%PYTHON_CMD% -m PyInstaller main.py --noconfirm --clean --windowed --name CMW500_BLE_Test --add-data "config.yaml;." --hidden-import pyvisa_py --hidden-import pyvisa_py.protocols --hidden-import pyvisa_py.protocols.rpc --hidden-import pyvisa_py.protocols.usb --hidden-import pyvisa_py.protocols.tcpip --hidden-import pyvisa_py.protocols.gpib --hidden-import pyvisa_py.protocols.serial --hidden-import usb --hidden-import usb.core --hidden-import usb.util --hidden-import serial --hidden-import serial.tools
+
+REM Build exe with PyInstaller spec
+echo [Step 4/4] Building exe...
+%PYTHON_CMD% -m PyInstaller "%PROJECT_DIR%\build_exe.spec" --noconfirm --clean
 if errorlevel 1 (
     echo.
     echo [ERROR] Build failed
@@ -84,9 +114,16 @@ if errorlevel 1 (
 )
 echo.
 
-REM Copy config.yaml to output
-echo [Step 3/3] Copying config files...
-copy /Y "%PROJECT_DIR%config.yaml" "%PROJECT_DIR%dist\CMW500_BLE_Test\config.yaml" >nul
+REM Verify output
+if not exist "%PROJECT_DIR%\dist\CMW500_BLE_Test\CMW500_BLE_Test.exe" (
+    echo [ERROR] Output exe not found!
+    pause
+    exit /b 1
+)
+
+REM Copy config.yaml to output (ensure latest config)
+echo [INFO] Copying latest config.yaml to output...
+copy /Y "%PROJECT_DIR%\config.yaml" "%PROJECT_DIR%\dist\CMW500_BLE_Test\config.yaml" >nul
 
 echo.
 echo ============================================
@@ -100,6 +137,6 @@ echo   2. Double-click CMW500_BLE_Test.exe to run
 echo ============================================
 echo.
 
-start "" explorer "%PROJECT_DIR%dist\CMW500_BLE_Test"
+start "" explorer "%PROJECT_DIR%\dist\CMW500_BLE_Test"
 
 pause

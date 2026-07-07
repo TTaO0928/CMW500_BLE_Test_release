@@ -158,6 +158,84 @@ class CMW500Connection:
             self.instrument = None
             return False, f"断开连接时发生未知错误：{e}"
 
+    @staticmethod
+    def scan_gpib_address(board=0, timeout=3000):
+        """
+        扫描指定 GPIB 板卡上所有可用地址
+
+        先通过 VISA 列出所有 GPIB 资源，再逐个发送 *IDN? 查询仪器标识，
+        返回所有响应的 (地址, 仪器标识) 列表。
+
+        参数:
+            board:   GPIB 板号，默认 0
+            timeout: 单次查询超时（毫秒），默认 3000
+
+        返回:
+            list[tuple[int, str]]: 发现的仪器列表，例如 [(20, "Rohde&Schwarz,CMW,...")]
+        """
+        found = []
+        rm = None
+        inst = None
+        try:
+            rm = pyvisa.ResourceManager()
+        except Exception:
+            return found
+
+        try:
+            # 先列出所有 GPIB 资源，避免逐个地址盲扫
+            resources = rm.list_resources("GPIB?*INSTR")
+        except Exception:
+            resources = []
+
+        for res in resources:
+            # 只处理指定 board 的资源
+            if not res.upper().startswith(f"GPIB{board}"):
+                continue
+            try:
+                inst = rm.open_resource(res)
+                inst.timeout = timeout
+                idn = inst.query("*IDN?").strip()
+                if idn:
+                    # 从资源字符串 GPIB0::20::INSTR 解析地址
+                    parts = res.split("::")
+                    addr = int(parts[1]) if len(parts) >= 2 else -1
+                    found.append((addr, idn))
+            except Exception:
+                continue
+            finally:
+                try:
+                    if inst is not None:
+                        inst.close()
+                        inst = None
+                except Exception:
+                    pass
+
+        # 如果 VISA 没有列出任何资源，再回退到逐个地址扫描
+        if not found:
+            for addr in range(31):
+                try:
+                    inst = rm.open_resource(f"GPIB{board}::{addr}::INSTR")
+                    inst.timeout = timeout
+                    idn = inst.query("*IDN?").strip()
+                    if idn:
+                        found.append((addr, idn))
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        if inst is not None:
+                            inst.close()
+                            inst = None
+                    except Exception:
+                        pass
+
+        try:
+            if rm is not None:
+                rm.close()
+        except Exception:
+            pass
+        return found
+
     def get_serial_number(self):
         """
         读取仪器序列号

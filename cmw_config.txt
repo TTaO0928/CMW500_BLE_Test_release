@@ -1,0 +1,16 @@
+*IDN? -> Rohde&Schwarz,CMW,1201.0002k50/106050,3.7.22
+SYST:ERR:ALL? -> -113,"Undefined header;*LRN?"
+CONF:BT:RX:MEAS:SEL? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+CONF:BT:RX:PHY? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+CONF:BT:RX:PACK:TYPE? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+CONF:BT:RX:PACK:PLEN? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+CONF:BT:RX:FREQ:CHAN? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+SOUR:BT:RX:POW:LEV? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+SOUR:BT:RX:POW:ENP? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+CONF:BT:RX:PACK:COUNt? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+CONF:BT:RX:FILT:BWID? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+CONF:BT:RX:DTXM? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+CONF:BT:RX:MIND? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+FETC:BT:RX:PER? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+FETC:BT:RX:PACK:ERR? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.
+FETC:BT:RX:STAT:PACK? -> ERROR: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.

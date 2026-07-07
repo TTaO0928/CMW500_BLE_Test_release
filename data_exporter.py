@@ -83,17 +83,49 @@ class DataExporter:
         将测试结果导出为格式化的 Excel 文件
 
         参数:
-            results:     测试结果列表（来自 BLETxModulationTest.get_results()）
+            results:     测试结果列表
             test_params: 测试参数配置字典
 
         返回:
             str: 导出文件的完整路径
         """
         self._ensure_output_dir()
-        filepath = self._generate_filename()
 
-        # ========== Sheet 1：测试数据 ==========
-        # 构建 DataFrame 数据
+        tx_results = [r for r in results if r.get("test_type") != "rx_per"]
+        rx_results = [r for r in results if r.get("test_type") == "rx_per"]
+
+        # 动态选择文件名前缀
+        if tx_results and rx_results:
+            prefix = "BLE_TX_RX_Test"
+        elif rx_results:
+            prefix = "BLE_RX_PER_Test"
+        else:
+            prefix = self.file_prefix
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{prefix}_{timestamp}.xlsx"
+        filepath = os.path.join(self.output_dir, filename)
+
+        with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
+            if tx_results:
+                self._write_tx_sheet(writer, tx_results, test_params)
+            if rx_results:
+                self._write_rx_per_sheet(writer, rx_results, test_params)
+
+        # 样式应用：取最大行数和列数
+        max_rows = max(len(tx_results) if tx_results else 0, len(rx_results) if rx_results else 0)
+        max_cols = 0
+        if tx_results:
+            df_tx = self._build_tx_dataframe(tx_results, test_params)
+            max_cols = max(max_cols, len(df_tx.columns))
+        if rx_results:
+            df_rx = self._build_rx_per_dataframe(rx_results, test_params)
+            max_cols = max(max_cols, len(df_rx.columns))
+        self._apply_styles(filepath, max_rows, max_cols)
+        return filepath
+
+    def _build_tx_dataframe(self, results, test_params):
+        """构建 TX 测试结果 DataFrame"""
         rows = []
         for r in results:
             row = {
@@ -101,7 +133,6 @@ class DataExporter:
                 "测量时间": r.get("timestamp", ""),
             }
 
-            # 遍历配置中的各项测量指标
             measurement_keys = [
                 "frequency_accuracy",
                 "frequency_drift",
@@ -112,31 +143,46 @@ class DataExporter:
             for key in measurement_keys:
                 name = test_params["measurements"][key]["name"]
                 unit = test_params["measurements"][key]["unit"]
-                # 测量数值列
                 row[f"{name} ({unit})"] = r.get(key, "N/A")
-                # 判定结果列
                 if "pass_fail" in r:
                     row[f"{name} 判定"] = r["pass_fail"].get(key, "N/A")
                 else:
                     row[f"{name} 判定"] = "ERROR"
 
             rows.append(row)
+        return pd.DataFrame(rows)
 
-        df = pd.DataFrame(rows)
-
-        # ========== Sheet 2：测试摘要 ==========
+    def _write_tx_sheet(self, writer, results, test_params):
+        """写入 TX 测试结果到 Excel"""
+        df = self._build_tx_dataframe(results, test_params)
+        df.to_excel(writer, sheet_name="TX 测试数据", index=False)
         summary_data = self._build_summary(results, test_params)
         df_summary = pd.DataFrame(summary_data)
+        df_summary.to_excel(writer, sheet_name="TX 测试摘要", index=False)
 
-        # 写入 Excel
-        with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="测试数据", index=False)
-            df_summary.to_excel(writer, sheet_name="测试摘要", index=False)
+    def _build_rx_per_dataframe(self, results, test_params):
+        """构建 RX PER 测试结果 DataFrame"""
+        rx_cfg = test_params.get("rx_per", {})
+        rows = []
+        for r in results:
+            rows.append({
+                "信道 (Channel)": r.get("channel", ""),
+                "测量时间": r.get("timestamp", ""),
+                "灵敏度 (dBm)": r.get("sensitivity", "N/A"),
+                "PER 阈值 (%)": rx_cfg.get("per_threshold", 30.8),
+                "最后通过功率 (dBm)": r.get("last_pass_power", "N/A"),
+                "最后失败功率 (dBm)": r.get("last_fail_power", "N/A"),
+                "判定": r.get("pass_fail", "--"),
+            })
+        return pd.DataFrame(rows)
 
-        # 对 Excel 进行样式美化
-        self._apply_styles(filepath, len(rows), len(df.columns))
-
-        return filepath
+    def _write_rx_per_sheet(self, writer, results, test_params):
+        """写入 RX PER 测试结果到 Excel"""
+        df = self._build_rx_per_dataframe(results, test_params)
+        df.to_excel(writer, sheet_name="RX PER 数据", index=False)
+        summary_data = self._build_rx_per_summary(results, test_params)
+        df_summary = pd.DataFrame(summary_data)
+        df_summary.to_excel(writer, sheet_name="RX PER 测试摘要", index=False)
 
     def _build_summary(self, results, test_params):
         """
@@ -199,6 +245,43 @@ class DataExporter:
         summary_rows.append({"项目": "有失败项信道数", "数值": total_channels - all_pass})
         summary_rows.append({"项目": "总体判定", "数值": "PASS" if all_pass == total_channels else "FAIL"})
 
+        return summary_rows
+
+    def _build_rx_per_summary(self, results, test_params):
+        """
+        构建 RX PER 测试摘要数据
+
+        参数:
+            results:     RX PER 测试结果列表
+            test_params: 测试参数配置
+
+        返回:
+            list[dict]: 摘要行列表
+        """
+        rx_cfg = test_params.get("rx_per", {})
+        total_channels = len(results)
+        found_count = sum(1 for r in results if r.get("sensitivity") is not None)
+        pass_count = sum(1 for r in results if r.get("pass_fail") == "PASS")
+        fail_count = sum(1 for r in results if r.get("pass_fail") == "FAIL")
+
+        summary_rows = [
+            {"项目": "测试时间", "数值": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+            {"项目": "测试类型", "数值": "BLE RX PER 接收灵敏度搜索"},
+            {"项目": "信道范围", "数值": f"Ch {test_params['channel_start']} ~ Ch {test_params['channel_end']}"},
+            {"项目": "起始功率 (dBm)", "数值": rx_cfg.get("start_power", -90.0)},
+            {"项目": "结束功率 (dBm)", "数值": rx_cfg.get("end_power", -100.0)},
+            {"项目": "功率步进 (dBm)", "数值": rx_cfg.get("step_size", 0.5)},
+            {"项目": "Expected Nominal Power (dBm)", "数值": rx_cfg.get("exp_nom_pow", 20.0)},
+            {"项目": "PER 阈值 (%)", "数值": rx_cfg.get("per_threshold", 30.8)},
+            {"项目": "每点发包数", "数值": rx_cfg.get("packet_count", 500)},
+            {"项目": "期望灵敏度 (dBm)", "数值": rx_cfg.get("expected_sensitivity", "未设置")},
+            {"项目": "———", "数值": "———"},
+            {"项目": "总测试信道数", "数值": total_channels},
+            {"项目": "找到灵敏度点数", "数值": found_count},
+            {"项目": "PASS 信道数", "数值": pass_count},
+            {"项目": "FAIL 信道数", "数值": fail_count},
+            {"项目": "总体判定", "数值": "PASS" if fail_count == 0 and found_count == total_channels else "FAIL"},
+        ]
         return summary_rows
 
     def _apply_styles(self, filepath, row_count, col_count):

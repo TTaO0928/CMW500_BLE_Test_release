@@ -24,6 +24,37 @@ instrument:
   # 连接超时时间（毫秒）
   timeout: 10000
 
+# DUT 连接配置（参考 CMWrun Connection 页面）
+dut_connection:
+  # 硬件接口：RS232 / USB
+  hw_interface: "RS232"
+  # EUT 通信协议：2Wire / HCI
+  comm_protocol: "2Wire"
+
+  # RS232 参数配置
+  rs232:
+    port: "COM1"
+    baud_rate: 115200
+    data_bits: 8
+    stop_bits: 1
+    parity: "None"
+    flow_control: "None"
+
+  # USB 参数配置
+  usb:
+    device: 0
+
+  # EUT 初始化选项
+  eut_init:
+    reset_eut: true
+    reset_delay: 0.0
+
+  # 信号特性
+  signal:
+    phy_type: "LE 1Msps"
+    pattern_type: "PRBS9"
+    payload_length: 37
+
 # 蓝牙 BLE TX 自动化测试参数
 test_params:
   # 测试标准：蓝牙低功耗 (Bluetooth Low Energy)
@@ -52,6 +83,9 @@ test_params:
     tx_power:
       name: "TX 功率测试"
       enabled: true
+    rx_per:
+      name: "RX PER 测试"
+      enabled: false
 
   # ============================================================
   # TX 调制测量项配置
@@ -61,50 +95,50 @@ test_params:
   modulation_measurements:
     # ------ BV-06-C 载波频率偏移和漂移 ------
     frequency_accuracy:
-      name: "频率准确度"
+      name: "Frequency Accuracy"
       unit: "kHz"
       upper_limit: 150.00
       lower_limit: -150.00
       enabled: true
     frequency_drift:
-      name: "频率漂移"
+      name: "Frequency Drift"
       unit: "kHz"
       upper_limit: 50.00
       lower_limit: -50.00
       enabled: true
     frequency_offset:
-      name: "频率偏移"
+      name: "Frequency Offset"
       unit: "kHz"
       upper_limit: 150.00
       lower_limit: -150.00
       enabled: true
     initial_frequency_drift:
-      name: "初始频率漂移"
+      name: "Initial Frequency Drift"
       unit: "kHz"
       upper_limit: 23.00
       lower_limit: -23.00
       enabled: true
     max_drift_rate:
-      name: "最大漂移速率"
+      name: "Max Drift Rate"
       unit: "kHz"
       upper_limit: 20.00
       lower_limit: -20.00
       enabled: true
     # ------ BV-05-C 调制特性 ------
     df1_avg:
-      name: "频率偏差 df1 avg"
+      name: "Frequency Deviation df1 avg"
       unit: "kHz"
       upper_limit: 275.00
       lower_limit: 225.00
       enabled: true
     df2_99pct:
-      name: "频率偏差 df2 99.9%"
+      name: "Frequency Deviation df2 99.9%"
       unit: "kHz"
       upper_limit: null
       lower_limit: 185.00
       enabled: true
     df2_df1_ratio:
-      name: "df2/df1 比例"
+      name: "df2/df1 Ratio"
       unit: ""
       upper_limit: null
       lower_limit: 0.80
@@ -115,48 +149,82 @@ test_params:
   # ============================================================
   power_measurements:
     average_power:
-      name: "平均功率"
+      name: "Average Power"
       unit: "dBm"
       upper_limit: 10.00
       lower_limit: -20.00
       enabled: true
     peak_power:
-      name: "峰均功率差"
+      name: "Peak Power"
       unit: "dBm"
-      upper_limit: 4.00
+      upper_limit: null
       lower_limit: null
       enabled: true
     leakage_power:
-      name: "泄漏功率"
+      name: "Leakage Power"
       unit: "dBm"
       upper_limit: null
       lower_limit: null
       enabled: true
 
+  # ============================================================
+  # RX PER 接收灵敏度搜索配置（BLE RX 测试）
+  # ============================================================
+  # 说明：
+  #   当前实现基于 CMW500 BLE Signaling Loopback 模式。
+  #   CMW500 与 DUT 建立 BLE 连接，DUT 进入 Loopback 回传数据包，
+  #   CMW500 自己统计 PER。程序按阶梯降低发射功率，找到 PER 达到
+  #   阈值的灵敏度点。
+  rx_per:
+    # 起始功率（dBm）。建议从较高功率开始，例如 -50 或 -90
+    start_power: -90.0
+    # 结束功率（dBm）。搜索到下限后停止，例如 -100
+    end_power: -100.0
+    # 功率步进（dBm）。程序内部会取负值，表示逐步降低功率
+    step_size: 0.5
+    # CMW Expected Nominal Power（dBm），Signaling 模式下默认 10
+    exp_nom_pow: 10.0
+    # PER 判定阈值（%）。BLE 规范通常为 30.8%
+    per_threshold: 30.8
+    # 每个功率点发送的数据包数量（参考 CMWrun 默认 1500）
+    packet_count: 1500
+    # 单次 RX Quality 测量超时时间（秒）
+    measurement_timeout: 20
+    # PHY 类型：LE1M / LE2M / LE500K / LE125K
+    phy_type: "LE1M"
+    # 数据包类型：PRBS9 / PRBS15 / 11110000 / 10101010
+    packet_type: "PRBS9"
+    # Payload 长度（bytes）
+    payload_length: 37
+    # 期望灵敏度（dBm），用于 PASS/FAIL 判定（如无限值可设为 null）
+    expected_sensitivity: -95.0
+    # 演示模式：true 时在没有真实 DUT 通信的情况下模拟 PER 曲线（仅用于界面验证）
+    demo_mode: false
+
   # 兼容旧版字段（测试执行器内部备用）
   measurements:
     frequency_accuracy:
-      name: "频率准确度"
+      name: "Frequency Accuracy"
       unit: "kHz"
       upper_limit: 150.00
       lower_limit: -150.00
     frequency_drift:
-      name: "频率漂移"
+      name: "Frequency Drift"
       unit: "kHz"
       upper_limit: 50.00
       lower_limit: -50.00
     frequency_offset:
-      name: "频率偏移"
+      name: "Frequency Offset"
       unit: "kHz"
       upper_limit: 150.00
       lower_limit: -150.00
     initial_frequency_drift:
-      name: "初始频率漂移"
+      name: "Initial Frequency Drift"
       unit: "kHz"
       upper_limit: 23.00
       lower_limit: -23.00
     max_drift_rate:
-      name: "最大漂移速率"
+      name: "Max Drift Rate"
       unit: "kHz"
       upper_limit: 20.00
       lower_limit: -20.00
