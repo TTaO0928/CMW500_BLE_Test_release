@@ -1,0 +1,11 @@
+# CMW500 自动化测试工具 - 依赖库列表
+pyvisa          # 仪器控制通信库
+pyvisa-py       # pyvisa 纯 Python 后端（无需安装 NI-VISA）
+pyusb           # USB 设备通信库（pyvisa-p 依赖）
+pyserial        # 串口通信库（pyvisa-py 依赖）
+PyQt6           # GUI 界面框架
+pandas          # 数据处理库
+openpyxl        # Excel 文件读写库
+PyYAML          # YAML 配置文件解析库
+matplotlib      # 数据可视化绘图库
+pyinstaller     # 打包为 exe 可执行文件

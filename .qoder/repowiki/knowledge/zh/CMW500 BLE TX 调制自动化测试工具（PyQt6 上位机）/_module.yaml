@@ -1,0 +1,19 @@
+schema_version: 1
+module_path: ""
+title: CMW500 BLE TX 调制自动化测试工具（PyQt6 上位机）
+scope:
+    - main.py
+    - gui_main.py
+    - instrument_connection.py
+    - test_executor.py
+    - data_exporter.py
+    - config.yaml
+    - requirements.txt
+    - build.bat
+    - build_exe.py
+    - build_exe.spec
+    - CMW500_BLE_Test.spec
+    - .aicoding-chat-workspace
+source_files: []
+depends_on: []
+related_to: []

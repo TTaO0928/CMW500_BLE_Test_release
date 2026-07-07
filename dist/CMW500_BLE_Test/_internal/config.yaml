@@ -1,0 +1,169 @@
+# CMW500 自动化测试工具 - 配置文件
+
+# 仪器连接配置
+instrument:
+  # 默认接口类型：LAN、GPIB 或 USB
+  interface_type: "LAN"
+  # LAN（TCP/IP）连接参数
+  lan:
+    # CMW500 的 IP 地址
+    ip_address: "192.168.1.100"
+  # GPIB 连接参数
+  gpib:
+    # GPIB 地址（板号::主地址）
+    board: 0
+    address: 20
+  # USB（TMC）连接参数
+  usb:
+    # 厂商标识（VID），R&S 默认为 0x0AAD
+    vendor_id: "0x0AAD"
+    # 产品标识（PID），CMW500 常见为 0x0117
+    product_id: "0x0117"
+    # 仪器序列号（留空则自动搜索第一个匹配设备）
+    serial_number: ""
+  # 连接超时时间（毫秒）
+  timeout: 10000
+
+# 蓝牙 BLE TX 自动化测试参数
+test_params:
+  # 测试标准：蓝牙低功耗 (Bluetooth Low Energy)
+  standard: "BT_LE"
+  # PHY 类型：LE 1Msps
+  phy_type: "LE_1Msps"
+  # 突发类型：Low Energy
+  burst_type: "Low_Energy"
+  # 数据包类型：RF PHY Test Ref P11
+  packet_type: "RF_PHY_Test_Ref_P11"
+  # 统计次数（每个信道测量取平均的样本数）
+  statistic_count: 10
+
+  # 信道范围（BLE 共 40 个信道：Channel 0 ~ 39）
+  channel_start: 0
+  channel_end: 39
+
+  # ============================================================
+  # 测试套件选择
+  # enabled: true 表示该套件默认勾选执行
+  # ============================================================
+  test_suites:
+    tx_modulation:
+      name: "TX 调制测试"
+      enabled: true
+    tx_power:
+      name: "TX 功率测试"
+      enabled: true
+
+  # ============================================================
+  # TX 调制测量项配置
+  # BV-06-C: 载波频率偏移和漂移（单位：kHz）
+  # BV-05-C: 调制特性（单位：kHz，部分为无单位比例）
+  # ============================================================
+  modulation_measurements:
+    # ------ BV-06-C 载波频率偏移和漂移 ------
+    frequency_accuracy:
+      name: "频率准确度"
+      unit: "kHz"
+      upper_limit: 150.00
+      lower_limit: -150.00
+      enabled: true
+    frequency_drift:
+      name: "频率漂移"
+      unit: "kHz"
+      upper_limit: 50.00
+      lower_limit: -50.00
+      enabled: true
+    frequency_offset:
+      name: "频率偏移"
+      unit: "kHz"
+      upper_limit: 150.00
+      lower_limit: -150.00
+      enabled: true
+    initial_frequency_drift:
+      name: "初始频率漂移"
+      unit: "kHz"
+      upper_limit: 23.00
+      lower_limit: -23.00
+      enabled: true
+    max_drift_rate:
+      name: "最大漂移速率"
+      unit: "kHz"
+      upper_limit: 20.00
+      lower_limit: -20.00
+      enabled: true
+    # ------ BV-05-C 调制特性 ------
+    df1_avg:
+      name: "频率偏差 df1 avg"
+      unit: "kHz"
+      upper_limit: 275.00
+      lower_limit: 225.00
+      enabled: true
+    df2_99pct:
+      name: "频率偏差 df2 99.9%"
+      unit: "kHz"
+      upper_limit: null
+      lower_limit: 185.00
+      enabled: true
+    df2_df1_ratio:
+      name: "df2/df1 比例"
+      unit: ""
+      upper_limit: null
+      lower_limit: 0.80
+      enabled: true
+
+  # ============================================================
+  # TX 功率测量项配置（BV-01-C）
+  # ============================================================
+  power_measurements:
+    average_power:
+      name: "平均功率"
+      unit: "dBm"
+      upper_limit: 10.00
+      lower_limit: -20.00
+      enabled: true
+    peak_power:
+      name: "峰均功率差"
+      unit: "dBm"
+      upper_limit: 4.00
+      lower_limit: null
+      enabled: true
+    leakage_power:
+      name: "泄漏功率"
+      unit: "dBm"
+      upper_limit: null
+      lower_limit: null
+      enabled: true
+
+  # 兼容旧版字段（测试执行器内部备用）
+  measurements:
+    frequency_accuracy:
+      name: "频率准确度"
+      unit: "kHz"
+      upper_limit: 150.00
+      lower_limit: -150.00
+    frequency_drift:
+      name: "频率漂移"
+      unit: "kHz"
+      upper_limit: 50.00
+      lower_limit: -50.00
+    frequency_offset:
+      name: "频率偏移"
+      unit: "kHz"
+      upper_limit: 150.00
+      lower_limit: -150.00
+    initial_frequency_drift:
+      name: "初始频率漂移"
+      unit: "kHz"
+      upper_limit: 23.00
+      lower_limit: -23.00
+    max_drift_rate:
+      name: "最大漂移速率"
+      unit: "kHz"
+      upper_limit: 20.00
+      lower_limit: -20.00
+
+# 数据导出配置
+export:
+  # 测试结果保存目录
+  output_dir: "./test_results"
+  # Excel 文件名前缀
+  file_prefix: "BLE_TX_Modulation_Test"
