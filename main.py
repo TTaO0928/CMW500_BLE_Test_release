@@ -15,6 +15,7 @@ CMW500 自动化测试工具 - 程序入口
 import sys
 import os
 import traceback
+import multiprocessing
 
 
 def get_app_dir():
@@ -289,6 +290,18 @@ def _normalize_config(config):
         inst["timeout"] = 10000
 
     config["instrument"] = inst
+
+    # 兼容旧版 rf_settings：eatt_output / eatt_input → int/ext_att_output / input
+    dut = config.get("dut_connection", {})
+    rf = dut.get("rf_settings", {})
+    if "eatt_output" in rf or "eatt_input" in rf:
+        rf.setdefault("int_att_output", 0.0)
+        rf.setdefault("ext_att_output", rf.pop("eatt_output", 0.0))
+        rf.setdefault("int_att_input", 0.0)
+        rf.setdefault("ext_att_input", rf.pop("eatt_input", 0.0))
+        dut["rf_settings"] = rf
+        config["dut_connection"] = dut
+
     return config
 
 
@@ -337,6 +350,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # PyInstaller 打包后使用 multiprocessing spawn 时必须调用，
+    # 否则子进程会重复执行主程序导致闪退/卡死
+    multiprocessing.freeze_support()
     try:
         main()
     except Exception as e:

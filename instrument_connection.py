@@ -12,7 +12,22 @@ SCPI 指令参考：
     *IDN?  —— 查询仪器标识信息（制造商、型号、序列号、固件版本）
 """
 
+import multiprocessing
+import time
+
 import pyvisa
+
+
+def _scan_gpib_worker(board, timeout, preferred_address, result_queue):
+    """子进程工作函数：扫描 GPIB 地址并把结果放入队列"""
+    try:
+        found = CMW500Connection.scan_gpib_address(
+            board=board,
+            timeout=timeout
+        )
+        result_queue.put(("found", found))
+    except Exception as e:
+        result_queue.put(("error", str(e)))
 
 
 class CMW500Connection:
@@ -165,6 +180,7 @@ class CMW500Connection:
 
         先通过 VISA 列出所有 GPIB 资源，再逐个发送 *IDN? 查询仪器标识，
         返回所有响应的 (地址, 仪器标识) 列表。
+        若 list_resources 无结果，则回退到逐个地址扫描。
 
         参数:
             board:   GPIB 板号，默认 0
@@ -235,6 +251,48 @@ class CMW500Connection:
         except Exception:
             pass
         return found
+
+    @classmethod
+    def scan_gpib_address_subprocess(cls, board=0, timeout=3000, max_wait=35):
+        """
+        在子进程中执行 GPIB 扫描，支持强制终止
+
+        部分 GPIB 驱动在单个地址上会无限制阻塞，导致 QThread 内的
+        pyvisa 调用无法通过普通事件取消。本方法将整个扫描放到独立
+        子进程中运行，超时后直接 terminate，避免 GUI 卡死。
+
+        参数:
+            board:    GPIB 板号，默认 0
+            timeout:  单次查询超时（毫秒），默认 3000
+            max_wait: 子进程最大等待时间（秒），默认 35
+
+        返回:
+            list[tuple[int, str]]: 发现的仪器列表
+        """
+        ctx = multiprocessing.get_context("spawn")
+        result_queue = ctx.Queue()
+        process = ctx.Process(
+            target=_scan_gpib_worker,
+            args=(board, timeout, None, result_queue)
+        )
+        process.start()
+        process.join(timeout=max_wait)
+
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=2)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=2)
+            return []
+
+        try:
+            status, payload = result_queue.get_nowait()
+            if status == "found":
+                return payload
+            return []
+        except Exception:
+            return []
 
     def get_serial_number(self):
         """

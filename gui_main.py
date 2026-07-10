@@ -4,9 +4,9 @@ CMW500 自动化测试工具 - PyQt6 上位机界面
 功能说明：
     提供图形化操作界面，包含：
     - 接口配置区：LAN/GPIB/USB 自适应布局
-    - 测试项配置区：勾选测试套件（TX调制/TX功率）和具体测量项
-    - 操作按钮区：连接、断开、开始测试、停止测试、导出 Excel
-    - 实时结果表格：逐信道显示测量数值和 PASS/FAIL 判定
+    - 测试项配置区：勾选测试套件（TX功率/RX PER/TX调制）和具体测量项
+    - 操作按钮区：连接、断开、开始测试、停止测试、测试结果、导出 Excel
+    - 结果弹窗：独立窗口按测试类型分页显示进度、表格和导出
     - 日志窗口：实时显示操作日志
     - 状态栏：显示连接状态和进度信息
     - 进度条：显示测试进度
@@ -27,6 +27,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QCursor, QAction
 
+import threading
+import multiprocessing
+
 # 兼容不同 PyQt6/5 版本的 QSizePolicy 枚举写法
 try:
     QSizePolicy_Expanding = QSizePolicy.Policy.Expanding
@@ -38,8 +41,10 @@ except AttributeError:
     QSizePolicy_Fixed     = QSizePolicy.Fixed
 
 from dut_settings_dialog import DUTSettingsDialog
-from instrument_connection import CMW500Connection
+from instrument_connection import CMW500Connection, _scan_gpib_worker
 from test_executor import MODULATION_ITEMS, POWER_ITEMS, BLERxPerTest
+from channel_selector import ChannelSelector
+from result_dialog import TestResultDialog
 
 
 class TestWorker(QThread):
@@ -56,55 +61,76 @@ class TestWorker(QThread):
     error_signal        = pyqtSignal(str)
     switch_table_signal = pyqtSignal(str, set, set)  # test_type, mod_keys, pow_keys
 
-    def __init__(self, cmw500, config, enabled_suites=None, enabled_items=None):
+    def __init__(self, cmw500, config, enabled_suites=None, enabled_items=None,
+                 channels=None):
         super().__init__()
         self.cmw500          = cmw500
         self.config          = config
         self.enabled_suites  = enabled_suites
         self.enabled_items   = enabled_items
+        self.channels        = channels or {}
         self.test_executor   = None
 
     def run(self):
-        """线程执行入口：按顺序执行 TX 测试和 RX PER 测试"""
+        """线程执行入口：按固定顺序执行 TX 功率 / RX PER / TX 调制"""
         try:
             enabled_suites = set(self.enabled_suites or [])
             enabled_items  = set(self.enabled_items or [])
             mod_keys = enabled_items & set(MODULATION_ITEMS.keys())
             pow_keys = enabled_items & set(POWER_ITEMS.keys())
+            channels = self.channels or {}
 
-            do_tx = "tx_modulation" in enabled_suites or "tx_power" in enabled_suites
-            do_rx = "rx_per" in enabled_suites
             results = []
 
-            # 阶段1：TX 调制 / TX 功率测试
-            if do_tx and (mod_keys or pow_keys):
-                self.switch_table_signal.emit("tx", mod_keys, pow_keys)
+            # 阶段1：TX 功率测试
+            if "tx_power" in enabled_suites and pow_keys:
+                self.switch_table_signal.emit("tx_power", set(), pow_keys)
                 from test_executor import BLETxModulationTest
                 self.test_executor = BLETxModulationTest(
                     self.cmw500, self.config,
-                    enabled_suites=self.enabled_suites,
-                    enabled_items=self.enabled_items,
+                    enabled_suites=["tx_power"],
+                    enabled_items=list(pow_keys),
+                    channels=channels.get("tx_power"),
                 )
                 self.test_executor.set_callbacks(
                     log_cb=lambda msg: self.log_signal.emit(msg),
                     progress_cb=lambda cur, total: self.progress_signal.emit(cur, total),
                     result_cb=lambda ch, data: self.result_signal.emit(ch, data),
                 )
-                tx_results = self.test_executor.run()
-                results.extend(tx_results)
+                results.extend(self.test_executor.run())
 
             # 阶段2：RX PER 灵敏度搜索
-            if do_rx and not self.isInterruptionRequested():
+            if "rx_per" in enabled_suites and not self.isInterruptionRequested():
                 if not (self.test_executor and self.test_executor.is_stopped):
                     self.switch_table_signal.emit("rx_per", set(), set())
-                    self.test_executor = BLERxPerTest(self.cmw500, self.config)
+                    self.test_executor = BLERxPerTest(
+                        self.cmw500, self.config,
+                        channels=channels.get("rx_per"),
+                    )
                     self.test_executor.set_callbacks(
                         log_cb=lambda msg: self.log_signal.emit(msg),
                         progress_cb=lambda cur, total: self.progress_signal.emit(cur, total),
                         result_cb=lambda ch, data: self.result_signal.emit(ch, data),
                     )
-                    rx_results = self.test_executor.run()
-                    results.extend(rx_results)
+                    results.extend(self.test_executor.run())
+
+            # 阶段3：TX 调制测试
+            if "tx_modulation" in enabled_suites and mod_keys and not self.isInterruptionRequested():
+                if not (self.test_executor and self.test_executor.is_stopped):
+                    self.switch_table_signal.emit("tx_modulation", mod_keys, set())
+                    from test_executor import BLETxModulationTest
+                    self.test_executor = BLETxModulationTest(
+                        self.cmw500, self.config,
+                        enabled_suites=["tx_modulation"],
+                        enabled_items=list(mod_keys),
+                        channels=channels.get("tx_modulation"),
+                    )
+                    self.test_executor.set_callbacks(
+                        log_cb=lambda msg: self.log_signal.emit(msg),
+                        progress_cb=lambda cur, total: self.progress_signal.emit(cur, total),
+                        result_cb=lambda ch, data: self.result_signal.emit(ch, data),
+                    )
+                    results.extend(self.test_executor.run())
 
             self.finished_signal.emit(results)
         except Exception as e:
@@ -120,24 +146,69 @@ class GPIBScanThread(QThread):
     """
     GPIB 地址扫描线程
 
-    在独立线程中扫描 GPIB 板卡上的可用地址，
-    避免阻塞 GUI 主线程导致界面卡死。
+    在独立子进程中执行 GPIB 扫描，子进程阻塞或卡死时
+    可通过 terminate/kill 强制结束，避免 GUI 主线程卡死。
     """
     finished_signal = pyqtSignal(list)
     error_signal    = pyqtSignal(str)
 
-    def __init__(self, board=0, timeout=1000):
+    def __init__(self, board=0, timeout=3000, max_wait=35):
         super().__init__()
         self.board = board
         self.timeout = timeout
+        self.max_wait = max_wait
+        self._process = None
+        self._cancelled = False
 
     def run(self):
-        """线程执行入口"""
+        """线程执行入口：启动子进程并等待结果"""
         try:
-            found = CMW500Connection.scan_gpib_address(self.board, self.timeout)
-            self.finished_signal.emit(found)
+            ctx = multiprocessing.get_context("spawn")
+            result_queue = ctx.Queue()
+            self._process = ctx.Process(
+                target=_scan_gpib_worker,
+                args=(self.board, self.timeout, None, result_queue)
+            )
+            self._process.start()
+
+            # 每 0.5 秒检查一次，既给 GUI 刷新机会，也能及时响应取消
+            waited = 0
+            interval = 0.5
+            while waited < self.max_wait and self._process.is_alive():
+                if self._cancelled:
+                    break
+                self._process.join(timeout=interval)
+                waited += interval
+
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(timeout=2)
+                if self._process.is_alive():
+                    self._process.kill()
+                    self._process.join(timeout=2)
+                self.finished_signal.emit([])
+                return
+
+            try:
+                status, payload = result_queue.get_nowait()
+                if status == "found":
+                    self.finished_signal.emit(payload)
+                else:
+                    self.error_signal.emit(str(payload))
+            except Exception as e:
+                self.error_signal.emit(str(e))
         except Exception as e:
             self.error_signal.emit(str(e))
+
+    def cancel(self):
+        """请求取消扫描"""
+        self._cancelled = True
+        if self._process is not None and self._process.is_alive():
+            self._process.terminate()
+            self._process.join(timeout=2)
+            if self._process.is_alive():
+                self._process.kill()
+                self._process.join(timeout=2)
 
 
 class CMW500MainWindow(QMainWindow):
@@ -149,14 +220,12 @@ class CMW500MainWindow(QMainWindow):
         self.cmw500 = cmw500
         self.test_worker = None
         self.scan_thread = None
-
-        # 表格列定义：动态生成，依据选中项更新
-        self.TABLE_COLUMNS   = []
-        self.MEASUREMENT_KEYS = []
+        self.result_dialog = None
+        self._last_results = []
 
         self.setWindowTitle("CMW500 BLE 自动化测试工具")
-        self.setMinimumSize(900, 680)
-        self.resize(1280, 800)
+        self.setMinimumSize(800, 560)
+        self.resize(900, 650)
 
         self._init_ui()
         self.statusBar().showMessage("就绪 - 请先连接仪器")
@@ -167,13 +236,6 @@ class CMW500MainWindow(QMainWindow):
 
     def _init_ui(self):
         """构建整体界面布局"""
-        # ----- 菜单栏 -----
-        menubar = self.menuBar()
-        settings_menu = menubar.addMenu("设置")
-        action_dut = QAction("DUT 连接设置", self)
-        action_dut.triggered.connect(self._open_dut_settings)
-        settings_menu.addAction(action_dut)
-
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
@@ -185,21 +247,18 @@ class CMW500MainWindow(QMainWindow):
         top_layout.setSpacing(8)
         top_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         top_layout.addWidget(self._create_interface_group())
-        top_layout.addWidget(self._create_test_items_group())
-        main_layout.addLayout(top_layout)
+        top_layout.addWidget(self._create_test_items_group(), stretch=1)
+        main_layout.addLayout(top_layout, stretch=1)
 
         # ----- 按钮操作区 -----
         main_layout.addWidget(self._create_button_group())
 
-        # ----- 中部：结果表格 + 进度条 -----
-        main_layout.addWidget(self._create_result_group(), stretch=3)
-
-        # ----- 底部：日志窗口 -----
-        main_layout.addWidget(self._create_log_group(), stretch=1)
+        # ----- 底部：日志窗口（固定高度） -----
+        main_layout.addWidget(self._create_log_group())
 
     def _open_dut_settings(self):
         """打开 DUT 连接设置对话框"""
-        dialog = DUTSettingsDialog(self.config, parent=self)
+        dialog = DUTSettingsDialog(self.config, self.cmw500, parent=self)
         if dialog.exec() == DUTSettingsDialog.DialogCode.Accepted:
             self.config = dialog.get_config()
             self._append_log("DUT 连接设置已更新")
@@ -224,6 +283,7 @@ class CMW500MainWindow(QMainWindow):
 
         label_font = QFont("微软雅黑", 10)
         input_font = QFont("Consolas", 10)
+        btn_font = QFont("微软雅黑", 10)
 
         # ---- 接口类型下拉框 ----
         lbl_type = QLabel("接口类型：")
@@ -309,6 +369,21 @@ class CMW500MainWindow(QMainWindow):
 
         outer_layout.addWidget(self.iface_stack, stretch=1)
 
+        # ---- DUT 设置按钮 ----
+        self.btn_dut_settings = QPushButton("DUT 设置")
+        self.btn_dut_settings.setFont(btn_font)
+        self.btn_dut_settings.setSizePolicy(QSizePolicy_Expanding, QSizePolicy_Fixed)
+        self.btn_dut_settings.setMinimumWidth(90)
+        self.btn_dut_settings.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_dut_settings.setStyleSheet(
+            "QPushButton { background-color: #FF9800; color: white; "
+            "padding: 8px 12px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #F57C00; }"
+            "QPushButton:disabled { background-color: #FFCC80; }"
+        )
+        self.btn_dut_settings.clicked.connect(self._open_dut_settings)
+        outer_layout.addWidget(self.btn_dut_settings)
+
         # 根据默认接口类型设置初始显示状态
         default_type = self.config["instrument"]["interface_type"]
         index_map = {"LAN": 0, "GPIB": 1}
@@ -358,18 +433,12 @@ class CMW500MainWindow(QMainWindow):
         pow_cfg = cfg_tp.get("power_measurements", {})
         suite_cfg = cfg_tp.get("test_suites", {})
 
-        # ---- 测试套件行： TX调制 / TX功率 ----
+        # ---- 测试套件行 ----
         suite_row = QHBoxLayout()
         suite_row.setSpacing(16)
         suite_lbl = QLabel("套件：")
         suite_lbl.setFont(label_font)
         suite_row.addWidget(suite_lbl)
-
-        self.chk_suite_mod = QCheckBox("TX 调制测试")
-        self.chk_suite_mod.setFont(cb_font)
-        self.chk_suite_mod.setChecked(suite_cfg.get("tx_modulation", {}).get("enabled", True))
-        self.chk_suite_mod.toggled.connect(self._on_suite_toggled)
-        suite_row.addWidget(self.chk_suite_mod)
 
         self.chk_suite_pow = QCheckBox("TX 功率测试")
         self.chk_suite_pow.setFont(cb_font)
@@ -382,6 +451,12 @@ class CMW500MainWindow(QMainWindow):
         self.chk_suite_rx.setChecked(suite_cfg.get("rx_per", {}).get("enabled", False))
         self.chk_suite_rx.toggled.connect(self._on_suite_toggled)
         suite_row.addWidget(self.chk_suite_rx)
+
+        self.chk_suite_mod = QCheckBox("TX 调制测试")
+        self.chk_suite_mod.setFont(cb_font)
+        self.chk_suite_mod.setChecked(suite_cfg.get("tx_modulation", {}).get("enabled", False))
+        self.chk_suite_mod.toggled.connect(self._on_suite_toggled)
+        suite_row.addWidget(self.chk_suite_mod)
         suite_row.addStretch()
 
         # 全选/反选按钮
@@ -404,41 +479,198 @@ class CMW500MainWindow(QMainWindow):
         line.setFrameShadow(QFrame.Shadow.Sunken)
         outer.addWidget(line)
 
-        # ---- 具体测量项勾选（垂直堆叠卡片式布局）----
+        # ---- 具体测量项勾选（垂直堆叠卡片式布局，外加滚动条）----
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMinimumHeight(120)
+
         items_widget = QWidget()
         items_layout = QVBoxLayout(items_widget)
         items_layout.setContentsMargins(0, 0, 0, 0)
         items_layout.setSpacing(8)
+        items_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        # 调制项：标题 + 左右两列（每列4项）
+        # 1) TX 功率项
+        pow_widget = QWidget()
+        pow_widget.setSizePolicy(QSizePolicy_Expanding, QSizePolicy_Expanding)
+        pow_outer = QVBoxLayout(pow_widget)
+        pow_outer.setContentsMargins(0, 0, 0, 0)
+        pow_outer.setSpacing(4)
+
+        pow_title_row = QHBoxLayout()
+        pow_title_row.setSpacing(6)
+        pow_icon = QLabel("⚡")
+        pow_icon.setFont(QFont("Segoe UI Emoji", 12))
+        pow_title = QLabel("TX 功率测试")
+        pow_title.setFont(QFont("微软雅黑", 12, QFont.Weight.Bold))
+        pow_title.setStyleSheet("color: #558B2F;")
+        pow_title_row.addWidget(pow_icon)
+        pow_title_row.addWidget(pow_title)
+        pow_title_row.addStretch()
+        pow_outer.addLayout(pow_title_row)
+
+        default_channels = cfg_tp.get("selected_channels", {}).get("tx_power", list(range(40)))
+        self._channel_selector_pow = ChannelSelector(default_channels=default_channels, label="信道选择")
+        pow_outer.addWidget(self._channel_selector_pow)
+
+        self._pow_checkboxes = {}
+        for key, (_, _, name, unit) in POWER_ITEMS.items():
+            chk = QCheckBox(f"{name}  ({unit})")
+            chk.setFont(cb_font)
+            chk.setChecked(pow_cfg.get(key, {}).get("enabled", True))
+            self._pow_checkboxes[key] = chk
+            pow_outer.addWidget(chk)
+        pow_outer.addStretch()
+        self._pow_widget = pow_widget
+
+        # 2) RX PER 配置编辑区
+        rx_widget = QWidget()
+        rx_widget.setSizePolicy(QSizePolicy_Expanding, QSizePolicy_Expanding)
+        rx_outer = QVBoxLayout(rx_widget)
+        rx_outer.setContentsMargins(0, 0, 0, 0)
+        rx_outer.setSpacing(6)
+
+        rx_title_row = QHBoxLayout()
+        rx_title_row.setSpacing(6)
+        rx_icon = QLabel("🔍")
+        rx_icon.setFont(QFont("Segoe UI Emoji", 12))
+        rx_title_lbl = QLabel("RX PER 测试")
+        rx_title_lbl.setFont(QFont("微软雅黑", 12, QFont.Weight.Bold))
+        rx_title_lbl.setStyleSheet("color: #C62828;")
+        rx_title_row.addWidget(rx_icon)
+        rx_title_row.addWidget(rx_title_lbl)
+        rx_title_row.addStretch()
+        rx_outer.addLayout(rx_title_row)
+
+        default_channels = cfg_tp.get("selected_channels", {}).get("rx_per", list(range(40)))
+        self._channel_selector_rx = ChannelSelector(default_channels=default_channels, label="信道选择")
+        rx_outer.addWidget(self._channel_selector_rx)
+
+        rx_cfg = cfg_tp.get("rx_per", {})
+        self._rx_inputs = {}
+
+        # 4列表单：col0=左标签  col1=左控件  col2=空  col3=右标签  col4=右控件
+        form = QGridLayout()
+        form.setContentsMargins(0, 6, 0, 0)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+        form.setColumnMinimumWidth(0, 68)   # 左标签
+        form.setColumnMinimumWidth(3, 68)   # 右标签
+        form.setColumnMinimumWidth(2, 24)   # 中间分隔
+        form.setColumnStretch(1, 1)
+        form.setColumnStretch(4, 1)
+
+        fnt_lbl  = QFont("微软雅黑", 10)
+        fnt_inp  = QFont("微软雅黑", 10)
+        fnt_unit = QFont("微软雅黑", 9)
+
+        def _lbl(text, align_right=True):
+            w = QLabel(text)
+            w.setFont(fnt_lbl)
+            if align_right:
+                w.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            return w
+
+        def _edit(val, width=90):
+            ed = QLineEdit(str(val))
+            ed.setFont(fnt_inp)
+            ed.setFixedWidth(width)
+            return ed
+
+        def _combo(items, current, width=110):
+            cb = QComboBox()
+            cb.setFont(fnt_inp)
+            cb.addItems(items)
+            cb.setCurrentText(current)
+            cb.setFixedWidth(width)
+            return cb
+
+        def _with_unit(widget, unit_text):
+            row = QHBoxLayout()
+            row.setSpacing(3)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(widget)
+            u = QLabel(unit_text)
+            u.setFont(fnt_unit)
+            u.setStyleSheet("color: #888;")
+            row.addWidget(u)
+            row.addStretch()
+            w = QWidget()
+            w.setLayout(row)
+            return w
+
+        # Row 0: 搜索范围  |  包型
+        start_edit = _edit(rx_cfg.get("start_power", -90.0), 68)
+        end_edit   = _edit(rx_cfg.get("end_power",   -100.0), 68)
+        arrow_lbl  = QLabel("→"); arrow_lbl.setFont(fnt_lbl)
+        range_hbox = QHBoxLayout(); range_hbox.setSpacing(4); range_hbox.setContentsMargins(0, 0, 0, 0)
+        range_hbox.addWidget(start_edit); range_hbox.addWidget(arrow_lbl); range_hbox.addWidget(end_edit)
+        u_dbm = QLabel("dBm"); u_dbm.setFont(fnt_unit); u_dbm.setStyleSheet("color: #888;")
+        range_hbox.addWidget(u_dbm); range_hbox.addStretch()
+        range_w = QWidget(); range_w.setLayout(range_hbox)
+        pkt_type_combo = _combo(["PRBS9", "PRBS15", "11110000", "10101010"],
+                                 rx_cfg.get("packet_type", "PRBS9"))
+        form.addWidget(_lbl("搜索范围:"), 0, 0)
+        form.addWidget(range_w,            0, 1)
+        form.addWidget(_lbl("包型:"),     0, 3)
+        form.addWidget(pkt_type_combo,     0, 4)
+        self._rx_inputs["start_power"]  = start_edit
+        self._rx_inputs["end_power"]    = end_edit
+        self._rx_inputs["packet_type"]  = pkt_type_combo
+
+        # Row 1: 功率步进  |  PER 阈值
+        step_edit = _edit(rx_cfg.get("step_size", 0.5))
+        per_edit  = _edit(rx_cfg.get("per_threshold", 30.8))
+        form.addWidget(_lbl("功率步进:"), 1, 0)
+        form.addWidget(_with_unit(step_edit, "dB"), 1, 1)
+        form.addWidget(_lbl("PER 阈值:"),  1, 3)
+        form.addWidget(_with_unit(per_edit, "%"),    1, 4)
+        self._rx_inputs["step_size"]     = step_edit
+        self._rx_inputs["per_threshold"] = per_edit
+
+        # Row 2: 每点包数  |  PHY
+        pkt_edit  = _edit(rx_cfg.get("packet_count", 1500))
+        phy_combo = _combo(["LE1M", "LE2M", "LE500K", "LE125K"],
+                           rx_cfg.get("phy_type", "LE1M"))
+        form.addWidget(_lbl("每点包数:"), 2, 0)
+        form.addWidget(pkt_edit,           2, 1)
+        form.addWidget(_lbl("PHY:"),       2, 3)
+        form.addWidget(phy_combo,          2, 4)
+        self._rx_inputs["packet_count"] = pkt_edit
+        self._rx_inputs["phy_type"]     = phy_combo
+
+        rx_outer.addLayout(form)
+        rx_outer.addStretch()
+        self._rx_widget = rx_widget
+
+        # 3) TX 调制项
         mod_widget = QWidget()
         mod_outer = QVBoxLayout(mod_widget)
         mod_outer.setContentsMargins(0, 0, 0, 0)
         mod_outer.setSpacing(4)
 
-        mod_title = QLabel("📊 TX 调制测试")
+        mod_title_row = QHBoxLayout()
+        mod_title_row.setSpacing(6)
+        mod_icon = QLabel("\U0001f4ca")
+        mod_icon.setFont(QFont("Segoe UI Emoji", 12))
+        mod_title = QLabel("TX 调制测试")
         mod_title.setFont(QFont("微软雅黑", 12, QFont.Weight.Bold))
         mod_title.setStyleSheet("color: #1565C0;")
-        mod_outer.addWidget(mod_title)
+        mod_title_row.addWidget(mod_icon)
+        mod_title_row.addWidget(mod_title)
+        mod_title_row.addStretch()
+        mod_outer.addLayout(mod_title_row)
 
-        # 信道选择
-        mod_ch_layout = QHBoxLayout()
-        mod_ch_layout.setSpacing(8)
-        mod_ch_lbl = QLabel("信道:")
-        mod_ch_lbl.setFont(QFont("微软雅黑", 10))
-        mod_ch_layout.addWidget(mod_ch_lbl)
-        self._combo_tx_channel_mod = QComboBox()
-        self._combo_tx_channel_mod.setFont(QFont("微软雅黑", 10))
-        self._combo_tx_channel_mod.addItems(["全部 (0~39)"] + [str(i) for i in range(40)])
-        self._combo_tx_channel_mod.setCurrentIndex(0)
-        self._combo_tx_channel_mod.setFixedWidth(120)
-        mod_ch_layout.addWidget(self._combo_tx_channel_mod)
-        mod_ch_layout.addStretch()
-        mod_outer.addLayout(mod_ch_layout)
+        default_channels = cfg_tp.get("selected_channels", {}).get("tx_modulation", list(range(40)))
+        self._channel_selector_mod = ChannelSelector(default_channels=default_channels, label="信道选择")
+        mod_outer.addWidget(self._channel_selector_mod)
 
-        self._mod_checkboxes = {}   # key -> QCheckBox
+        self._mod_checkboxes = {}
         mod_items = list(MODULATION_ITEMS.items())
-        half = (len(mod_items) + 1) // 2  # 左列4个，右列4个
+        half = (len(mod_items) + 1) // 2
 
         mod_cols = QHBoxLayout()
         mod_cols.setSpacing(16)
@@ -447,7 +679,7 @@ class CMW500MainWindow(QMainWindow):
         mod_right = QVBoxLayout()
         mod_right.setSpacing(4)
 
-        for i, (key, (_, name, unit)) in enumerate(mod_items):
+        for i, (key, (_, _, name, unit, _)) in enumerate(mod_items):
             chk = QCheckBox(f"{name}  ({unit})")
             chk.setFont(cb_font)
             chk.setChecked(mod_cfg.get(key, {}).get("enabled", True))
@@ -464,191 +696,27 @@ class CMW500MainWindow(QMainWindow):
         mod_outer.addLayout(mod_cols)
         self._mod_widget = mod_widget
         mod_widget.setSizePolicy(QSizePolicy_Expanding, QSizePolicy_Expanding)
-        items_layout.addWidget(mod_widget)
 
         # 水平分隔线
         hline1 = QFrame()
         hline1.setFrameShape(QFrame.Shape.HLine)
         hline1.setFrameShadow(QFrame.Shadow.Sunken)
-        self._hline_mod_pow = hline1
-        items_layout.addWidget(hline1)
+        self._hline_pow_rx = hline1
 
-        # 功率项：标题 + 子项
-        pow_widget = QWidget()
-        pow_widget.setSizePolicy(QSizePolicy_Expanding, QSizePolicy_Expanding)
-        pow_outer = QVBoxLayout(pow_widget)
-        pow_outer.setContentsMargins(0, 0, 0, 0)
-        pow_outer.setSpacing(4)
-
-        pow_title = QLabel("⚡ TX 功率测试")
-        pow_title.setFont(QFont("微软雅黑", 12, QFont.Weight.Bold))
-        pow_title.setStyleSheet("color: #558B2F;")
-        pow_outer.addWidget(pow_title)
-
-        # 信道选择
-        pow_ch_layout = QHBoxLayout()
-        pow_ch_layout.setSpacing(8)
-        pow_ch_lbl = QLabel("信道:")
-        pow_ch_lbl.setFont(QFont("微软雅黑", 10))
-        pow_ch_layout.addWidget(pow_ch_lbl)
-        self._combo_tx_channel_pow = QComboBox()
-        self._combo_tx_channel_pow.setFont(QFont("微软雅黑", 10))
-        self._combo_tx_channel_pow.addItems(["全部 (0~39)"] + [str(i) for i in range(40)])
-        self._combo_tx_channel_pow.setCurrentIndex(0)
-        self._combo_tx_channel_pow.setFixedWidth(120)
-        pow_ch_layout.addWidget(self._combo_tx_channel_pow)
-        pow_ch_layout.addStretch()
-        pow_outer.addLayout(pow_ch_layout)
-
-        self._pow_checkboxes = {}   # key -> QCheckBox
-        for key, (_, name, unit) in POWER_ITEMS.items():
-            chk = QCheckBox(f"{name}  ({unit})")
-            chk.setFont(cb_font)
-            chk.setChecked(pow_cfg.get(key, {}).get("enabled", True))
-            self._pow_checkboxes[key] = chk
-            pow_outer.addWidget(chk)
-        pow_outer.addStretch()
-        self._pow_widget = pow_widget
-        items_layout.addWidget(pow_widget)
-
-        # 水平分隔线
         hline2 = QFrame()
         hline2.setFrameShape(QFrame.Shape.HLine)
         hline2.setFrameShadow(QFrame.Shadow.Sunken)
-        self._hline_pow_rx = hline2
-        items_layout.addWidget(hline2)
+        self._hline_rx_mod = hline2
 
-        # RX PER 配置编辑区
-        rx_widget = QWidget()
-        rx_widget.setSizePolicy(QSizePolicy_Expanding, QSizePolicy_Expanding)
-        rx_outer = QVBoxLayout(rx_widget)
-        rx_outer.setContentsMargins(0, 0, 0, 0)
-        rx_outer.setSpacing(4)
-
-        rx_title = QLabel("🔍 RX PER 测试")
-        rx_title.setFont(QFont("微软雅黑", 12, QFont.Weight.Bold))
-        rx_title.setStyleSheet("color: #C62828;")
-        rx_outer.addWidget(rx_title)
-
-        rx_cfg = cfg_tp.get("rx_per", {})
-        self._rx_inputs = {}
-
-        form = QGridLayout()
-        form.setContentsMargins(0, 4, 0, 0)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(8)
-        form.setColumnStretch(1, 1)
-
-        def add_row(row, label, widget):
-            lbl = QLabel(label)
-            lbl.setFont(QFont("微软雅黑", 10))
-            form.addWidget(lbl, row, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            form.addWidget(widget, row, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-        # 搜索范围：起止功率
-        start_edit = QLineEdit(str(rx_cfg.get("start_power", -90.0)))
-        end_edit = QLineEdit(str(rx_cfg.get("end_power", -100.0)))
-        for ed in (start_edit, end_edit):
-            ed.setFont(QFont("微软雅黑", 10))
-            ed.setMinimumWidth(80)
-            ed.setMaximumWidth(100)
-        range_layout = QHBoxLayout()
-        range_layout.setSpacing(4)
-        range_layout.addWidget(start_edit)
-        range_layout.addWidget(QLabel("→"))
-        range_layout.addWidget(end_edit)
-        range_layout.addWidget(QLabel("dBm"))
-        range_layout.addStretch()
-        range_widget = QWidget()
-        range_widget.setLayout(range_layout)
-        add_row(0, "搜索范围:", range_widget)
-        self._rx_inputs["start_power"] = start_edit
-        self._rx_inputs["end_power"] = end_edit
-
-        # 功率步进
-        step_edit = QLineEdit(str(rx_cfg.get("step_size", 0.5)))
-        step_edit.setFont(QFont("微软雅黑", 10))
-        step_edit.setMinimumWidth(80)
-        step_edit.setMaximumWidth(100)
-        step_layout = QHBoxLayout()
-        step_layout.addWidget(step_edit)
-        step_layout.addWidget(QLabel("dB"))
-        step_layout.addStretch()
-        step_widget = QWidget()
-        step_widget.setLayout(step_layout)
-        add_row(1, "功率步进:", step_widget)
-        self._rx_inputs["step_size"] = step_edit
-
-        # PER 阈值
-        per_edit = QLineEdit(str(rx_cfg.get("per_threshold", 30.8)))
-        per_edit.setFont(QFont("微软雅黑", 10))
-        per_edit.setMinimumWidth(80)
-        per_edit.setMaximumWidth(100)
-        per_layout = QHBoxLayout()
-        per_layout.addWidget(per_edit)
-        per_layout.addWidget(QLabel("%"))
-        per_layout.addStretch()
-        per_widget = QWidget()
-        per_widget.setLayout(per_layout)
-        add_row(2, "PER 阈值:", per_widget)
-        self._rx_inputs["per_threshold"] = per_edit
-
-        # 每点包数
-        pkt_edit = QLineEdit(str(rx_cfg.get("packet_count", 1500)))
-        pkt_edit.setFont(QFont("微软雅黑", 10))
-        pkt_edit.setMinimumWidth(80)
-        pkt_edit.setMaximumWidth(100)
-        add_row(3, "每点包数:", pkt_edit)
-        self._rx_inputs["packet_count"] = pkt_edit
-
-        # PHY
-        phy_combo = QComboBox()
-        phy_combo.setFont(QFont("微软雅黑", 10))
-        phy_combo.addItems(["LE1M", "LE2M", "LE500K", "LE125K"])
-        phy_combo.setCurrentText(rx_cfg.get("phy_type", "LE1M"))
-        add_row(4, "PHY:", phy_combo)
-        self._rx_inputs["phy_type"] = phy_combo
-
-        # 包型
-        pkt_type_combo = QComboBox()
-        pkt_type_combo.setFont(QFont("微软雅黑", 10))
-        pkt_type_combo.addItems(["PRBS9", "PRBS15", "11110000", "10101010"])
-        pkt_type_combo.setCurrentText(rx_cfg.get("packet_type", "PRBS9"))
-        add_row(5, "包型:", pkt_type_combo)
-        self._rx_inputs["packet_type"] = pkt_type_combo
-
-        # 期望灵敏度
-        exp_edit = QLineEdit(str(rx_cfg.get("expected_sensitivity", -95.0)))
-        exp_edit.setFont(QFont("微软雅黑", 10))
-        exp_edit.setMinimumWidth(80)
-        exp_edit.setMaximumWidth(100)
-        exp_layout = QHBoxLayout()
-        exp_layout.addWidget(exp_edit)
-        exp_layout.addWidget(QLabel("dBm（用于 PASS/FAIL 判定）"))
-        exp_layout.addStretch()
-        exp_widget = QWidget()
-        exp_widget.setLayout(exp_layout)
-        add_row(6, "期望灵敏度:", exp_widget)
-        self._rx_inputs["expected_sensitivity"] = exp_edit
-
-        rx_outer.addLayout(form)
-        rx_outer.addStretch()
-
-        self._rx_widget = rx_widget
+        # 按顺序添加：TX功率、RX PER、TX调制
+        items_layout.addWidget(pow_widget)
+        items_layout.addWidget(hline1)
         items_layout.addWidget(rx_widget)
+        items_layout.addWidget(hline2)
+        items_layout.addWidget(mod_widget)
 
-        # 同步两个 TX 信道选择下拉框
-        def sync_tx_channel(source):
-            target = self._combo_tx_channel_pow if source == self._combo_tx_channel_mod else self._combo_tx_channel_mod
-            if target.currentIndex() != source.currentIndex():
-                target.blockSignals(True)
-                target.setCurrentIndex(source.currentIndex())
-                target.blockSignals(False)
-
-        self._combo_tx_channel_mod.currentIndexChanged.connect(lambda: sync_tx_channel(self._combo_tx_channel_mod))
-        self._combo_tx_channel_pow.currentIndexChanged.connect(lambda: sync_tx_channel(self._combo_tx_channel_pow))
-
-        outer.addWidget(items_widget, stretch=1)
+        scroll.setWidget(items_widget)
+        outer.addWidget(scroll, stretch=1)
 
         # 初始化一次可见性
         self._on_suite_toggled()
@@ -672,8 +740,8 @@ class CMW500MainWindow(QMainWindow):
         self._rx_widget.setVisible(rx_on)
 
         # 分隔线：只在相邻两个区域都显示时出现
-        self._hline_mod_pow.setVisible(mod_on and pow_on)
-        self._hline_pow_rx.setVisible((mod_on or pow_on) and rx_on)
+        self._hline_pow_rx.setVisible(pow_on and rx_on)
+        self._hline_rx_mod.setVisible(rx_on and mod_on)
 
     def _sync_rx_per_config_from_ui(self):
         """将 RX PER 界面输入框的值同步到 self.config"""
@@ -698,12 +766,6 @@ class CMW500MainWindow(QMainWindow):
         rx_cfg["packet_count"] = to_int(self._rx_inputs["packet_count"].text(), "每点包数")
         rx_cfg["phy_type"] = self._rx_inputs["phy_type"].currentText()
         rx_cfg["packet_type"] = self._rx_inputs["packet_type"].currentText()
-
-        exp_text = self._rx_inputs["expected_sensitivity"].text().strip()
-        if exp_text.lower() in ("", "null", "none", "未设置"):
-            rx_cfg["expected_sensitivity"] = None
-        else:
-            rx_cfg["expected_sensitivity"] = to_float(exp_text, "期望灵敏度")
 
     def _select_all_items(self):
         """全选全部测量项"""
@@ -746,69 +808,6 @@ class CMW500MainWindow(QMainWindow):
                 if chk.isChecked():
                     items.add(k)
         return suites, items
-
-    def _build_table_columns(self, enabled_mod_keys, enabled_pow_keys, test_type="tx"):
-        """根据当前勾选项动态构建表格列定义"""
-        self._current_test_type = test_type
-
-        if test_type == "rx_per":
-            self.TABLE_COLUMNS = [
-                "信道",
-                "灵敏度\n(dBm)",
-                "PER 阈值\n(%)",
-                "最后通过功率\n(dBm)",
-                "最后失败功率\n(dBm)",
-                "判定",
-            ]
-            self.MEASUREMENT_KEYS = []
-            return
-
-        cfg = self.config["test_params"]
-        mod_cfg = cfg.get("modulation_measurements", {})
-        pow_cfg = cfg.get("power_measurements", {})
-
-        cols   = ["信道"]
-        keys   = []
-
-        # 调制项：按 MODULATION_ITEMS 顺序
-        for key in MODULATION_ITEMS:
-            if key in enabled_mod_keys:
-                info = mod_cfg.get(key, {})
-                name = info.get("name", key)
-                unit = info.get("unit", "")
-                cols.append(f"{name}\n({unit})")
-                cols.append("判定")
-                keys.append(key)
-
-        # 功率项：按 POWER_ITEMS 顺序
-        for key in POWER_ITEMS:
-            if key in enabled_pow_keys:
-                info = pow_cfg.get(key, {})
-                name = info.get("name", key)
-                unit = info.get("unit", "")
-                cols.append(f"{name}\n({unit})")
-                has_limit = info.get("upper_limit") is not None or info.get("lower_limit") is not None
-                if has_limit:
-                    cols.append("判定")
-                    keys.append((key, True))
-                else:
-                    keys.append((key, False))
-
-        self.TABLE_COLUMNS    = cols
-        # 展平：调制项用 str，功率项用 tuple(key, has_limit)
-        self.MEASUREMENT_KEYS = (
-            list(enabled_mod_keys & set(MODULATION_ITEMS))
-            + [(k, v) for k, v in [q for q in
-               [(kk, pow_cfg.get(kk, {}).get("upper_limit") is not None
-                 or pow_cfg.get(kk, {}).get("lower_limit") is not None)
-                for kk in POWER_ITEMS if kk in enabled_pow_keys]]]
-        )
-        # 调制项保持 MODULATION_ITEMS 顺序
-        mod_ordered  = [k for k in MODULATION_ITEMS if k in enabled_mod_keys]
-        pow_ordered  = [(k, pow_cfg.get(k, {}).get("upper_limit") is not None
-                          or pow_cfg.get(k, {}).get("lower_limit") is not None)
-                        for k in POWER_ITEMS if k in enabled_pow_keys]
-        self.MEASUREMENT_KEYS = mod_ordered + pow_ordered
 
     def _create_button_group(self):
         """创建按钮操作区"""
@@ -869,21 +868,21 @@ class CMW500MainWindow(QMainWindow):
 
         layout.addSpacing(12)
 
-        # ---- 导出 Excel 按钮 ----
-        self.btn_export = QPushButton("导出 Excel")
-        self.btn_export.setFont(btn_font)
-        self.btn_export.setEnabled(False)
-        self.btn_export.setSizePolicy(QSizePolicy_Expanding, QSizePolicy_Fixed)
-        self.btn_export.setMinimumWidth(90)
-        self.btn_export.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_export.setStyleSheet(
+        # ---- 测试结果按钮 ----
+        self.btn_results = QPushButton("测试结果")
+        self.btn_results.setFont(btn_font)
+        self.btn_results.setEnabled(True)
+        self.btn_results.setSizePolicy(QSizePolicy_Expanding, QSizePolicy_Fixed)
+        self.btn_results.setMinimumWidth(90)
+        self.btn_results.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_results.setStyleSheet(
             "QPushButton { background-color: #9C27B0; color: white; "
             "padding: 8px 12px; border-radius: 4px; }"
             "QPushButton:hover { background-color: #7B1FA2; }"
             "QPushButton:disabled { background-color: #CE93D8; }"
         )
-        self.btn_export.clicked.connect(self._on_export)
-        layout.addWidget(self.btn_export)
+        self.btn_results.clicked.connect(self._on_show_results)
+        layout.addWidget(self.btn_results)
 
         # 弹性空间
         layout.addStretch()
@@ -896,52 +895,20 @@ class CMW500MainWindow(QMainWindow):
 
         return group
 
-    def _create_result_group(self):
-        """创建结果表格和进度条区域"""
-        group = QGroupBox("测试结果")
-        layout = QVBoxLayout(group)
-
-        # 进度条
-        progress_layout = QHBoxLayout()
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFixedHeight(25)
-        self.progress_label = QLabel("进度：0 / 0")
-        self.progress_label.setFont(QFont("微软雅黑", 10))
-        progress_layout.addWidget(self.progress_bar, stretch=1)
-        progress_layout.addWidget(self.progress_label)
-        layout.addLayout(progress_layout)
-
-        # 结果表格
-        self.table = QTableWidget()
-        self.table.setColumnCount(len(self.TABLE_COLUMNS))
-        self.table.setHorizontalHeaderLabels(self.TABLE_COLUMNS)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)  # 禁止编辑
-        self.table.setAlternatingRowColors(True)  # 交替行颜色
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-
-        # 设置表头样式
-        header = self.table.horizontalHeader()
-        header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table.setFont(QFont("微软雅黑", 9))
-        self.table.horizontalHeader().setFont(QFont("微软雅黑", 9, QFont.Weight.Bold))
-
-        layout.addWidget(self.table)
-        return group
-
     def _create_log_group(self):
         """创建日志窗口"""
         group = QGroupBox("运行日志")
+        group.setSizePolicy(QSizePolicy_Expanding, QSizePolicy_Maximum)
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(6, 4, 6, 6)
+        layout.setSpacing(0)
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QFont("Consolas", 9))
+        self.log_text.setFixedHeight(90)
         self.log_text.setStyleSheet(
-            "QTextEdit { background-color: #1e1e1e; color: #cccccc; }"
+            "QTextEdit { background-color: #1e1e1e; color: #cccccc; border: none; }"
         )
         layout.addWidget(self.log_text)
         return group
@@ -984,6 +951,7 @@ class CMW500MainWindow(QMainWindow):
             self.label_status.setText("● 已连接")
             self.label_status.setStyleSheet("color: #4CAF50;")
             self.statusBar().showMessage("仪器已连接")
+            QMessageBox.information(self, "连接成功", message)
         else:
             self._append_log(f"[错误] {message}")
             QMessageBox.warning(self, "连接失败", message)
@@ -992,27 +960,32 @@ class CMW500MainWindow(QMainWindow):
             self._set_interface_inputs_enabled(True)
 
     def _on_scan_gpib(self):
-        """点击 GPIB 自动识别按钮 —— 在独立线程中扫描可用地址"""
+        """点击 GPIB 自动识别按钮 —— 在独立子进程中扫描可用地址"""
+        # 再次点击可取消正在进行的扫描
+        if self.scan_thread is not None and self.scan_thread.isRunning():
+            self.scan_thread.cancel()
+            self._append_log("正在取消 GPIB 扫描...")
+            return
+
         board = self.spin_gpib_board.value()
-        self._append_log(f"正在扫描 GPIB 板卡 {board} 的地址 ...")
-        self.btn_scan_gpib.setEnabled(False)
-        self.btn_scan_gpib.setText("扫描中...")
+        self._append_log(f"正在扫描 GPIB 板卡 {board} 的地址（子进程，最长 35 秒）...")
+        self.btn_scan_gpib.setText("停止扫描")
+        self.btn_scan_gpib.setEnabled(True)
         self.btn_connect.setEnabled(False)
 
-        self.scan_thread = GPIBScanThread(board=board, timeout=3000)
+        self.scan_thread = GPIBScanThread(board=board, timeout=3000, max_wait=35)
         self.scan_thread.finished_signal.connect(self._on_gpib_scan_finished)
         self.scan_thread.error_signal.connect(self._on_gpib_scan_error)
         self.scan_thread.start()
 
     def _on_gpib_scan_finished(self, found):
         """GPIB 扫描完成回调"""
-        self.btn_scan_gpib.setEnabled(True)
-        self.btn_scan_gpib.setText("自动识别")
-        self.btn_connect.setEnabled(True)
+        self._reset_gpib_scan_button()
+        self.scan_thread = None
 
         if not found:
-            self._append_log("[提示] 未找到任何 GPIB 仪器，请检查线缆连接")
-            QMessageBox.information(self, "自动识别", "未找到 GPIB 仪器，请检查线缆连接")
+            self._append_log("[提示] 未找到任何 GPIB 仪器，请检查线缆连接或手动输入地址")
+            QMessageBox.information(self, "自动识别", "未找到 GPIB 仪器，请检查线缆连接或手动输入地址")
             return
 
         if len(found) == 1:
@@ -1029,11 +1002,16 @@ class CMW500MainWindow(QMainWindow):
 
     def _on_gpib_scan_error(self, error_msg):
         """GPIB 扫描出错回调"""
-        self.btn_scan_gpib.setEnabled(True)
-        self.btn_scan_gpib.setText("自动识别")
-        self.btn_connect.setEnabled(True)
+        self._reset_gpib_scan_button()
+        self.scan_thread = None
         self._append_log(f"[错误] GPIB 扫描失败：{error_msg}")
         QMessageBox.warning(self, "扫描失败", f"GPIB 扫描失败：{error_msg}")
+
+    def _reset_gpib_scan_button(self):
+        """恢复 GPIB 扫描按钮状态"""
+        self.btn_scan_gpib.setText("自动识别")
+        self.btn_scan_gpib.setEnabled(True)
+        self.btn_connect.setEnabled(True)
 
     def _on_disconnect(self):
         """点击"断开仪器"按钮"""
@@ -1076,50 +1054,51 @@ class CMW500MainWindow(QMainWindow):
                 QMessageBox.warning(self, "参数错误", str(e))
                 return
 
-        # 应用 TX 信道选择（如有）
-        if has_tx:
-            if not items:
-                QMessageBox.warning(self, "提示", "请至少勾选一个测量项")
-                return
-            channel_text = self._combo_tx_channel_mod.currentText()
-            if channel_text == "全部 (0~39)":
-                self.config["test_params"]["channel_start"] = 0
-                self.config["test_params"]["channel_end"] = 39
-            else:
-                ch = int(channel_text)
-                self.config["test_params"]["channel_start"] = ch
-                self.config["test_params"]["channel_end"] = ch
+        # 收集各套件独立信道选择
+        channels = {
+            "tx_power": self._channel_selector_pow.get_selected_channels(),
+            "rx_per": self._channel_selector_rx.get_selected_channels(),
+            "tx_modulation": self._channel_selector_mod.get_selected_channels(),
+        }
 
-        # 根据首个执行的套件初始化表格列
+        # 根据首个执行的套件初始化弹窗表格列
         mod_keys = items & set(MODULATION_ITEMS.keys())
         pow_keys = items & set(POWER_ITEMS.keys())
-        if has_tx:
-            self._build_table_columns(mod_keys, pow_keys, test_type="tx")
-        else:
-            self._build_table_columns(set(), set(), test_type="rx_per")
 
-        # 应用新表头
-        self.table.setColumnCount(len(self.TABLE_COLUMNS))
-        self.table.setHorizontalHeaderLabels(self.TABLE_COLUMNS)
-        self.table.setRowCount(0)
-        self.progress_bar.setValue(0)
+        # 创建/复用结果弹窗
+        if self.result_dialog is None:
+            self.result_dialog = TestResultDialog(self.config, parent=self)
+        self.result_dialog.set_test_config(self.config)
+        self.result_dialog.reset()
+        first_type = "tx_power"
+        if "tx_power" in suites and pow_keys:
+            first_type = "tx_power"
+        elif "rx_per" in suites:
+            first_type = "rx_per"
+        elif "tx_modulation" in suites and mod_keys:
+            first_type = "tx_modulation"
+        self.result_dialog.on_switch_table(first_type, mod_keys, pow_keys)
+        self.result_dialog.show()
+        self.result_dialog.raise_()
+        self.result_dialog.activateWindow()
 
         # 创建工作线程
         self.test_worker = TestWorker(
             self.cmw500, self.config,
             enabled_suites=suites,
             enabled_items=items,
+            channels=channels,
         )
         self.test_worker.log_signal.connect(self._append_log)
-        self.test_worker.switch_table_signal.connect(self._on_switch_table)
-        self.test_worker.result_signal.connect(self._on_channel_result)
-        self.test_worker.progress_signal.connect(self._on_progress_update)
+        self.test_worker.switch_table_signal.connect(self.result_dialog.on_switch_table)
+        self.test_worker.result_signal.connect(self.result_dialog.on_channel_result)
+        self.test_worker.progress_signal.connect(self.result_dialog.on_progress_update)
+        self.test_worker.finished_signal.connect(self.result_dialog.on_test_finished)
         self.test_worker.finished_signal.connect(self._on_test_finished)
         self.test_worker.error_signal.connect(self._on_test_error)
 
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        self.btn_export.setEnabled(False)
         self.btn_disconnect.setEnabled(False)
         self.statusBar().showMessage("测试执行中...")
         self.test_worker.start()
@@ -1131,90 +1110,18 @@ class CMW500MainWindow(QMainWindow):
             self._append_log("已发送停止信号，等待当前信道完成...")
             self.btn_stop.setEnabled(False)
 
-    def _on_export(self):
-        """点击"导出 Excel"按钮"""
-        if not hasattr(self, '_last_results') or not self._last_results:
-            QMessageBox.information(self, "提示", "没有可导出的测试数据")
-            return
-
-        try:
-            from data_exporter import DataExporter
-            exporter = DataExporter(self.config)
-            filepath = exporter.export_to_excel(
-                self._last_results,
-                self.config["test_params"]
-            )
-            self._append_log(f"测试结果已导出：{filepath}")
-            self.statusBar().showMessage(f"导出成功：{filepath}")
-            QMessageBox.information(self, "导出成功", f"文件已保存至：\n{filepath}")
-        except Exception as e:
-            self._append_log(f"[错误] 导出失败：{e}")
-            QMessageBox.critical(self, "导出失败", str(e))
+    def _on_show_results(self):
+        """点击"测试结果"按钮，打开/激活结果弹窗"""
+        if self.result_dialog is None:
+            self.result_dialog = TestResultDialog(self.config, parent=self)
+            self.result_dialog.set_test_config(self.config)
+        self.result_dialog.show()
+        self.result_dialog.raise_()
+        self.result_dialog.activateWindow()
 
     # ============================================================
     #                    信号槽函数（线程安全）
     # ============================================================
-
-    def _on_switch_table(self, test_type, mod_keys, pow_keys):
-        """测试阶段切换时更新表格列（由工作线程信号触发）"""
-        if test_type == "rx_per":
-            self._build_table_columns(set(), set(), test_type="rx_per")
-        else:
-            self._build_table_columns(mod_keys, pow_keys, test_type="tx")
-
-        self.table.setColumnCount(len(self.TABLE_COLUMNS))
-        self.table.setHorizontalHeaderLabels(self.TABLE_COLUMNS)
-        self.table.setRowCount(0)
-
-    def _on_channel_result(self, channel, result):
-        """接收单个信道测试结果（由工作线程信号触发）"""
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        self._set_cell(row, 0, str(channel))
-
-        if getattr(self, "_current_test_type", "tx") == "rx_per":
-            # RX PER 结果：灵敏度、PER 阈值、最后通过功率、最后失败功率、判定
-            self._set_cell(row, 1, f"{result.get('sensitivity'):.1f}" if result.get('sensitivity') is not None else "N/A")
-            self._set_cell(row, 2, f"{result.get('per_threshold', ''):.1f}")
-            self._set_cell(row, 3, f"{result.get('last_pass_power'):.1f}" if result.get('last_pass_power') is not None else "N/A")
-            self._set_cell(row, 4, f"{result.get('last_fail_power'):.1f}" if result.get('last_fail_power') is not None else "N/A")
-            pf = result.get("pass_fail", "--")
-            self._set_cell(row, 5, pf, is_pass_fail=True)
-            self.table.scrollToBottom()
-            return
-
-        col = 1
-        cfg = self.config["test_params"]
-        pow_cfg = cfg.get("power_measurements", {})
-
-        for entry in self.MEASUREMENT_KEYS:
-            if isinstance(entry, str):
-                # 调制项：数值 + 判定
-                key = entry
-                value = result.get(key)
-                self._set_cell(row, col, str(value) if value is not None else "N/A")
-                col += 1
-                pf = result.get("pass_fail", {}).get(key, "N/A")
-                self._set_cell(row, col, pf, is_pass_fail=True)
-                col += 1
-            else:
-                # 功率项：(key, has_limit)
-                key, has_limit = entry
-                value = result.get(key)
-                self._set_cell(row, col, str(value) if value is not None else "N/A")
-                col += 1
-                if has_limit:
-                    pf = result.get("pass_fail", {}).get(key, "N/A")
-                    self._set_cell(row, col, pf, is_pass_fail=True)
-                    col += 1
-
-        self.table.scrollToBottom()
-
-    def _on_progress_update(self, current, total):
-        """更新进度条（由工作线程信号触发）"""
-        percent = int(current / total * 100) if total > 0 else 0
-        self.progress_bar.setValue(percent)
-        self.progress_label.setText(f"进度：{current} / {total}")
 
     def _on_test_finished(self, results):
         """测试完成处理（由工作线程信号触发）"""
@@ -1223,7 +1130,6 @@ class CMW500MainWindow(QMainWindow):
         # 恢复按钮状态
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
-        self.btn_export.setEnabled(len(results) > 0)
         self.btn_disconnect.setEnabled(True)
 
         tx_results = [r for r in results if r.get("test_type") != "rx_per"]
@@ -1242,11 +1148,13 @@ class CMW500MainWindow(QMainWindow):
         if rx_results:
             total_rx = len(rx_results)
             found = sum(1 for r in rx_results if r.get("sensitivity") is not None)
-            all_pass = sum(1 for r in rx_results if r.get("pass_fail") == "PASS")
-            self._append_log(f"=== RX PER 测试完成：{found}/{total_rx} 个信道找到灵敏度点，通过 {all_pass}/{total_rx} 个信道 ===")
-            messages.append(f"RX PER 找到 {found}/{total_rx}，通过 {all_pass}/{total_rx}")
+            self._append_log(f"=== RX PER 测试完成：{found}/{total_rx} 个信道找到灵敏度点 ===")
+            messages.append(f"RX PER 找到 {found}/{total_rx}")
 
         self.statusBar().showMessage("；".join(messages) if messages else "测试完成")
+
+        # 弹窗通知
+        QMessageBox.information(self, "测试完成", "测试完成")
 
     def _on_test_error(self, error_msg):
         """测试异常处理（由工作线程信号触发）"""
@@ -1269,28 +1177,3 @@ class CMW500MainWindow(QMainWindow):
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def _set_cell(self, row, col, text, is_pass_fail=False):
-        """
-        设置表格单元格内容和样式
-
-        参数:
-            row:          行号
-            col:          列号
-            text:         单元格文本
-            is_pass_fail: 是否为判定列（用于着色）
-        """
-        item = QTableWidgetItem(text)
-        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        if is_pass_fail:
-            if text == "PASS":
-                item.setBackground(QColor("#C6EFCE"))  # 浅绿色
-                item.setForeground(QColor("#006100"))  # 深绿色文字
-            elif text == "FAIL":
-                item.setBackground(QColor("#FFC7CE"))  # 浅红色
-                item.setForeground(QColor("#9C0006"))  # 深红色文字
-            elif text == "ERROR":
-                item.setBackground(QColor("#FFEB9C"))  # 浅黄色
-                item.setForeground(QColor("#9C6500"))  # 深黄色文字
-
-        self.table.setItem(row, col, item)

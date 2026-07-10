@@ -16,7 +16,6 @@ CMW500 自动化测试工具 - 测试执行模块
     ── TX 功率测试（BV-01-C 输出功率）
          - 平均功率 (Average Power)                 -20 ~ +10 dBm
          - 峰均功率差 (Peak-Average Power)          ≤4 dBm
-         - 泄漏功率 (Leakage Power)                 无限值（仅记录）
 
     测试套件和各测量项均可通过 enabled_suites / enabled_items 控制。
 
@@ -33,38 +32,44 @@ import pyvisa
 
 
 # ============================================================
-# 调制测量项定义：key → (SCPI查询命令, 默认名称, 单位)
-# BV-06-C: 载波频率偏移和漂移
-# BV-05-C: 调制特性
+# 调制测量项定义（MEV 模式）
+# key → (FETC SCPI命令, 值索引, 默认名称, 单位)
+# FETC:BLU:MEAS:MEV:MOD:LEN:MAX? 返回16个值 (BV-06-C)
+# FETC:BLU:MEAS:MEV:MOD:LEN:MIN? 返回11个值 (BV-05-C)
 # ============================================================
 MODULATION_ITEMS = {
-    # BV-06-C
-    "frequency_accuracy":      ("FETC:BT:TX:FACC? AVER",      "Frequency Accuracy",        "kHz"),
-    "frequency_drift":         ("FETC:BT:TX:FDR? AVER",       "Frequency Drift",          "kHz"),
-    "frequency_offset":        ("FETC:BT:TX:FOFF? AVER",      "Frequency Offset",          "kHz"),
-    "initial_frequency_drift": ("FETC:BT:TX:FDR:INIT? AVER",  "Initial Frequency Drift",      "kHz"),
-    "max_drift_rate":           ("FETC:BT:TX:FDR:RATE? AVER",  "Max Drift Rate",      "kHz"),
-    # BV-05-C
-    "df1_avg":                  ("FETC:BT:TX:DF1:AVER? AVER",  "Frequency Deviation df1 avg",   "kHz"),
-    "df2_99pct":                ("FETC:BT:TX:DF2:P999? AVER",  "Frequency Deviation df2 99.9%", "kHz"),
-    "df2_df1_ratio":            ("FETC:BT:TX:DF2:RAT? AVER",   "df2/df1 Ratio",          ""),
+    # BV-06-C: 载波频率偏移和漂移（P11 pattern → MAX? 16个值）
+    # CMW 返回单位为 Hz，显示时除以 1000 转换为 kHz
+    "frequency_accuracy":      ("FETC:BLU:MEAS:MEV:MOD:LEN:MAX?",  3,  "Frequency Accuracy",        "kHz", 1000.0),
+    "frequency_drift":         ("FETC:BLU:MEAS:MEV:MOD:LEN:MAX?",  4,  "Frequency Drift",           "kHz", 1000.0),
+    "max_drift_rate":          ("FETC:BLU:MEAS:MEV:MOD:LEN:MAX?",  5,  "Max Drift Rate",            "kHz", 1000.0),
+    "frequency_offset":        ("FETC:BLU:MEAS:MEV:MOD:LEN:MAX?", 14,  "Frequency Offset",          "kHz", 1000.0),
+    "initial_frequency_drift": ("FETC:BLU:MEAS:MEV:MOD:LEN:MAX?", 15,  "Initial Frequency Drift",   "kHz", 1000.0),
+    # BV-05-C: 调制特性
+    # df1_avg 在 P11 pattern → MIN? 的 Average 字段（idx 2），CMW 返回单位为 Hz
+    # df2_99pct 在 P44 pattern → MAX? 的最大/99.9% 字段（idx 8），CMW 返回单位为 Hz
+    # ratio 由代码计算：df2 / df1
+    "df1_avg":                 ("FETC:BLU:MEAS:MEV:MOD:LEN:MIN?",  2,  "Frequency Deviation df1 avg",   "kHz", 1000.0),
+    "df2_99pct":               ("FETC:BLU:MEAS:MEV:MOD:LEN:MAX?",  8,  "Frequency Deviation df2 max",   "kHz", 1000.0),
+    "df2_df1_ratio":           ("",                                0,  "df2/df1 Ratio",                 "",    1.0),
 }
 
 # ============================================================
-# 功率测量项定义：key → (SCPI查询命令, 默认名称, 单位)
-# BV-01-C: 输出功率
+# 功率测量项定义（MEV PVT 模式）
+# key → (FETC SCPI命令, 值索引, 默认名称, 单位)
+# FETC:BLU:MEAS:MEV:PVT:LEN:AVER? 返回6个值:
+#   stat, count, avg_power, peak_power, min_power, peak_avg_diff
 # ============================================================
 POWER_ITEMS = {
-    "average_power":  ("FETC:BT:TX:POW:AVER? AVER",  "Average Power",   "dBm"),
-    "peak_power":     ("FETC:BT:TX:POW:PEAK? AVER",   "Peak Power", "dBm"),  # Peak Power
-    "leakage_power":  ("FETC:BT:TX:POW:LEAK? AVER",  "Leakage Power",   "dBm"),
+    "average_power":  ("FETC:BLU:MEAS:MEV:PVT:LEN:AVER?", 2,  "Average Power",   "dBm"),
+    "peak_power":     ("FETC:BLU:MEAS:MEV:PVT:LEN:AVER?", 3,  "Peak Power",      "dBm"),
 }
 
 
 class BLETxModulationTest:
     """BLE TX 全项目测试执行类（调制 + 功率，全信道）"""
 
-    def __init__(self, cmw500, config, enabled_suites=None, enabled_items=None):
+    def __init__(self, cmw500, config, enabled_suites=None, enabled_items=None, channels=None):
         """
         初始化测试执行器
 
@@ -75,12 +80,14 @@ class BLETxModulationTest:
                             为 None 时从 config 读取 enabled 字段
             enabled_items:  启用的具体测量项 key 集合（set），
                             为 None 时从 config 各 measurements 的 enabled 字段读取
+            channels:       要测试的信道列表，None 时使用 channel_start/channel_end
         """
         self.cmw500 = cmw500
         self.test_params = config["test_params"]
         self.channel_start = self.test_params["channel_start"]
         self.channel_end   = self.test_params["channel_end"]
         self.statistic_count = self.test_params["statistic_count"]
+        self.channels = channels
 
         # ---- 确定启用的测试套件 ----
         suite_cfg = self.test_params.get("test_suites", {})
@@ -146,58 +153,205 @@ class BLETxModulationTest:
     #               仪器配置（根据套件切换测量模式）
     # ============================================================
 
-    def configure_instrument_modulation(self):
-        """配置 CMW500 为 TX 调制测量模式"""
-        self._log("配置 CMW500 → TX 调制测量模式...")
-        self.cmw500.send_command("*RST")
-        time.sleep(1)
-        self.cmw500.send_command("CONF:BT:TX:MEAS:SEL TXMod")
-        self.cmw500.send_command("CONF:BT:TX:BURSt:TYPE LEN")
-        self.cmw500.send_command("CONF:BT:TX:PHY LE1M")
-        self.cmw500.send_command(f"CONF:BT:TX:SCOUNt {self.statistic_count}")
-        self.cmw500.send_command("CONF:BT:TX:PACK:TYPE RFP1")
-        self._log("TX 调制测量模式配置完成")
-
     def configure_instrument_power(self):
-        """配置 CMW500 为 TX 功率测量模式"""
-        self._log("配置 CMW500 → TX 功率测量模式...")
-        self.cmw500.send_command("*RST")
-        time.sleep(1)
-        self.cmw500.send_command("CONF:BT:TX:MEAS:SEL TXPow")
-        self.cmw500.send_command("CONF:BT:TX:BURSt:TYPE LEN")
-        self.cmw500.send_command("CONF:BT:TX:PHY LE1M")
-        self.cmw500.send_command(f"CONF:BT:TX:SCOUNt {self.statistic_count}")
-        self.cmw500.send_command("CONF:BT:TX:PACK:TYPE RFP1")
+        """配置 CMW500 为 TX 功率测量模式（MEV PVT，对齐 BV-01-C 参考日志）"""
+        self._log("配置 CMW500 → TX 功率测量模式 (MEV PVT)...")
+        # MEV 通用设置
+        self.cmw500.send_command("CONF:BLU:MEAS:ISIG:PATT:LEN OTH")
+        self.cmw500.send_command("CONF:BLU:SIGN:CONN:PACK:PLEN:LEN 37")
+        self.cmw500.send_command("CONF:BLU:SIGN:RFSettings:DTX:MINDex:MODE:LEN STAN")
+        self.cmw500.send_command("TRIG:BLU:MEAS:MEV:TOUT 1")
+        # PVT Scope
+        self.cmw500.send_command("CONF:BLU:MEAS:MEV:SCO:PVT 1")
+        self.cmw500.send_command("CONF:BLU:MEAS:MEV:REP SING")
+        # 选择 PVT 结果项（第8位 ON = 平均功率）
+        self.cmw500.send_command("CONF:BLU:MEAS:MEV:RES:ALL OFF,OFF,OFF,OFF,OFF,OFF,OFF,ON,OFF,OFF,OFF,OFF")
         self._log("TX 功率测量模式配置完成")
 
     # ============================================================
     #               单信道测量
     # ============================================================
 
-    def _measure_channel_items(self, channel, items_dict, enabled_keys):
-        """
-        通用单信道测量方法
-
-        参数:
-            channel:      信道号
-            items_dict:   MODULATION_ITEMS 或 POWER_ITEMS
-            enabled_keys: 本次启用的 key 集合
-
-        返回:
-            dict: {key: float | None}
-        """
-        result = {}
-        self.cmw500.send_command(f"CONF:BT:TX:FREQ:CHAN {channel}")
-        self.cmw500.send_command("INIT:IMM")
-        self.cmw500.query("*OPC?")
-
-        for key in enabled_keys:
-            scpi_cmd, _, _ = items_dict[key]
+    def _wait_for_state(self, query_cmd, target_values, timeout_ms=30000, interval_ms=500):
+        """循环查询仪器状态，直到返回目标值之一"""
+        target_set = {v.upper() for v in target_values}
+        elapsed = 0
+        while elapsed < timeout_ms and not self.is_stopped:
             try:
-                value = float(self.cmw500.query(scpi_cmd))
-                result[key] = round(value, 3)
-            except Exception:
+                state = self.cmw500.query(query_cmd).strip().upper()
+                if state in target_set:
+                    return state
+            except pyvisa.VisaIOError:
+                pass
+            time.sleep(interval_ms / 1000.0)
+            elapsed += interval_ms
+        return None
+
+    def _setup_ble_signaling(self):
+        """建立 BLE 信令连接（对齐 CMWrun Init + Config + Connect 参考日志）"""
+        self._log("建立 BLE 信令连接...")
+        # Config 步骤（CMWrun 参考无 SYST:RES:ALL，直接配置）
+        self.cmw500.send_command("CONF:BLU:SIGN:RFS:ARAN ON")
+        self.cmw500.send_command("CONF:BLU:SIGN:RFS:HOPP OFF")
+        self.cmw500.send_command("CONF:BLU:SIGN:CONN:WHIT OFF")
+        self.cmw500.send_command("ROUT:BLU:MEAS:SCEN:CSP 'Bluetooth Sig1'")
+        # 开启信令并等待 ON
+        self.cmw500.send_command("SOUR:BLU:SIGN:STATe ON")
+        state = self._wait_for_state("SOUR:BLU:SIGN:STATe?", ["ON"],
+                                     timeout_ms=30000, interval_ms=500)
+        if state != "ON":
+            raise RuntimeError("蓝牙信令模块未能启动")
+        # 连接参数
+        self.cmw500.send_command("CONF:BLU:SIGN:CONN:BTYP LE")
+        self.cmw500.send_command("CONF:BLU:SIGN:CONN:PHY:LEN LE1M")
+        # Connect 步骤
+        state = self.cmw500.query("CALL:BLU:SIGN:CONN:CHECk:LEN?").strip().upper()
+        if state != "PASS":
+            raise RuntimeError(f"BLE 连接检查失败：{state}")
+        self._log("BLE 信令连接正常")
+
+    def configure_instrument_modulation(self):
+        """配置 CMW500 为 TX 调制测量模式（MEV MOD，对齐 BV-05-C/BV-06-C）"""
+        self._log("配置 CMW500 → TX 调制测量模式 (MEV MOD)...")
+        self.cmw500.send_command("CONF:BLU:SIGN:RFS:ARAN ON")
+        self.cmw500.send_command("CONF:BLU:SIGN:CONN:PACK:PLEN:LEN 37")
+        self.cmw500.send_command("CONF:BLU:SIGN:RFSettings:DTX:MINDex:MODE:LEN STAN")
+        self.cmw500.send_command("TRIG:BLU:MEAS:MEV:TOUT 1")
+        self.cmw500.send_command("CONF:BLU:MEAS:MEV:SCO:MOD 10")
+        self.cmw500.send_command("CONF:BLU:MEAS:MEV:REP SING")
+        self.cmw500.send_command("CONF:BLU:MEAS:MEV:RES:ALL OFF,OFF,ON,OFF,OFF,OFF,OFF,OFF,OFF,OFF,OFF,OFF")
+        self._log("TX 调制测量模式配置完成")
+
+    # ============================================================
+    #               单信道测量
+    # ============================================================
+
+    def _measure_power_channel(self, channel):
+        """单信道 PVT 功率测量（INIT → poll → FETC）"""
+        result = {}
+        self.cmw500.send_command(f"CONF:BLU:SIGN:RFS:CHAN:DTM {channel}")
+        self.cmw500.send_command("INIT:BLU:MEAS:MEV")
+        state = self._wait_for_state("FETC:BLU:MEAS:MEV:STATe?", ["RDY", "READY"],
+                                     timeout_ms=30000, interval_ms=500)
+        if state is None:
+            self._log(f"Channel {channel} PVT 测量超时")
+            return {k: None for k in self.enabled_pow_items}
+        # PVT 只需一次 FETC
+        fetched = {}
+        for key in self.enabled_pow_items:
+            scpi_cmd, idx, _, _ = POWER_ITEMS[key]
+            if scpi_cmd not in fetched:
+                try:
+                    resp = self.cmw500.query(scpi_cmd)
+                    fetched[scpi_cmd] = [v.strip() for v in resp.split(",")]
+                except Exception:
+                    fetched[scpi_cmd] = []
+            vals = fetched[scpi_cmd]
+            try:
+                result[key] = round(float(vals[idx]), 3)
+            except (IndexError, ValueError):
                 result[key] = None
+        return result
+
+    def _measure_mod_channel(self, channel):
+        """单信道调制测量（BV-06-C: P11→MAX?, BV-05-C: P44→MAX? + P11→MIN?）"""
+        result = {}
+        self.cmw500.send_command(f"CONF:BLU:SIGN:RFS:CHAN:DTM {channel}")
+
+        # 确定需要哪些查询
+        bv06_keys = {k for k in self.enabled_mod_items if k in (
+            "frequency_accuracy", "frequency_drift", "max_drift_rate",
+            "frequency_offset", "initial_frequency_drift")}
+        bv05_keys = {k for k in self.enabled_mod_items if k in (
+            "df1_avg", "df2_99pct", "df2_df1_ratio")}
+
+        # ---- BV-06-C: P11 pattern → MAX? ----
+        if bv06_keys:
+            self.cmw500.send_command("CONF:BLU:SIGN:CONN:PACK:PATT:LEN P11")
+            self.cmw500.send_command("INIT:BLU:MEAS:MEV")
+            state = self._wait_for_state("FETC:BLU:MEAS:MEV:STATe?", ["RDY", "READY"],
+                                         timeout_ms=30000, interval_ms=500)
+            if state is None:
+                self._log(f"Channel {channel} BV-06-C MAX? 超时")
+                for k in bv06_keys:
+                    result[k] = None
+            else:
+                try:
+                    resp = self.cmw500.query("FETC:BLU:MEAS:MEV:MOD:LEN:MAX?")
+                    vals = [v.strip() for v in resp.split(",")]
+                except Exception:
+                    vals = []
+                self._log(f"[调试] BV-06-C MAX? 原始返回: {resp}")
+                for key in bv06_keys:
+                    _, idx, _, _, scale = MODULATION_ITEMS[key]
+                    try:
+                        raw = float(vals[idx])
+                        result[key] = round(raw / scale, 3)
+                        self._log(f"[调试] {key}: 原始={raw}, 缩放后={result[key]}")
+                    except (IndexError, ValueError):
+                        result[key] = None
+
+        # ---- BV-05-C: P44 → MAX? (df2) + P11 → MIN? (df1) ----
+        if bv05_keys:
+            df1_avg = None
+            df2_99pct = None
+
+            # 步骤1: P44 pattern → MAX? 读取 df2
+            if "df2_99pct" in bv05_keys or "df2_df1_ratio" in bv05_keys:
+                self.cmw500.send_command("CONF:BLU:SIGN:CONN:PACK:PATT:LEN P44")
+                self.cmw500.send_command("INIT:BLU:MEAS:MEV")
+                state = self._wait_for_state("FETC:BLU:MEAS:MEV:STATe?", ["RDY", "READY"],
+                                             timeout_ms=30000, interval_ms=500)
+                if state is None:
+                    self._log(f"Channel {channel} BV-05-C P44 MAX? 超时")
+                else:
+                    try:
+                        resp = self.cmw500.query("FETC:BLU:MEAS:MEV:MOD:LEN:MAX?")
+                        vals = [v.strip() for v in resp.split(",")]
+                    except Exception:
+                        vals = []
+                    self._log(f"[调试] BV-05-C P44 MAX? 原始返回: {resp}")
+                    _, idx, _, _, scale = MODULATION_ITEMS["df2_99pct"]
+                    try:
+                        raw = float(vals[idx])
+                        df2_99pct = round(raw / scale, 3)
+                        self._log(f"[调试] df2_99pct: 原始={raw}, 缩放后={df2_99pct}")
+                    except (IndexError, ValueError):
+                        df2_99pct = None
+
+            # 步骤2: P11 pattern → MIN? 读取 df1
+            if "df1_avg" in bv05_keys or "df2_df1_ratio" in bv05_keys:
+                self.cmw500.send_command("CONF:BLU:SIGN:CONN:PACK:PATT:LEN P11")
+                self.cmw500.send_command("INIT:BLU:MEAS:MEV")
+                state = self._wait_for_state("FETC:BLU:MEAS:MEV:STATe?", ["RDY", "READY"],
+                                             timeout_ms=30000, interval_ms=500)
+                if state is None:
+                    self._log(f"Channel {channel} BV-05-C MIN? 超时")
+                else:
+                    try:
+                        resp = self.cmw500.query("FETC:BLU:MEAS:MEV:MOD:LEN:MIN?")
+                        vals = [v.strip() for v in resp.split(",")]
+                    except Exception:
+                        vals = []
+                    self._log(f"[调试] BV-05-C MIN? 原始返回: {resp}")
+                    _, idx, _, _, scale = MODULATION_ITEMS["df1_avg"]
+                    try:
+                        raw = float(vals[idx])
+                        df1_avg = round(raw / scale, 3)
+                        self._log(f"[调试] df1_avg: 原始={raw}, 缩放后={df1_avg}")
+                    except (IndexError, ValueError):
+                        df1_avg = None
+
+            if "df1_avg" in bv05_keys:
+                result["df1_avg"] = df1_avg
+            if "df2_99pct" in bv05_keys:
+                result["df2_99pct"] = df2_99pct
+            if "df2_df1_ratio" in bv05_keys:
+                if df1_avg and df2_99pct and df1_avg != 0:
+                    result["df2_df1_ratio"] = round(df2_99pct / df1_avg, 3)
+                else:
+                    result["df2_df1_ratio"] = None
+
         return result
 
     def _judge_pass_fail(self, measurements):
@@ -236,18 +390,29 @@ class BLETxModulationTest:
     #               主执行流程
     # ============================================================
 
+    def _emit_channel_result(self, ch, channel_results, all_keys):
+        """对单个信道做 PASS/FAIL 判定并立即回调输出"""
+        r = channel_results[ch]
+        measurements = {k: r.get(k) for k in all_keys}
+        r["pass_fail"] = self._judge_pass_fail(measurements)
+        pf = r["pass_fail"]
+        pass_cnt = sum(1 for v in pf.values() if v == "PASS")
+        self._log(f"Channel {ch}: {pass_cnt}/{len(pf)} 项通过")
+        if self.result_callback:
+            self.result_callback(ch, r)
+
     def run(self):
         """
         执行完整测试流程：
           1. 若启用 TX 调制测试 → 遍历全信道执行调制测量
           2. 若启用 TX 功率测试 → 遍历全信道执行功率测量
-          两次扫描结果按信道合并后返回
+          每测完一个信道立即输出结果
         """
         self.is_running = True
         self.is_stopped = False
         self.results = []
 
-        channels = list(range(self.channel_start, self.channel_end + 1))
+        channels = self.channels if self.channels else list(range(self.channel_start, self.channel_end + 1))
         total_channels = len(channels)
 
         do_mod = "tx_modulation" in self.enabled_suites and len(self.enabled_mod_items) > 0
@@ -257,13 +422,27 @@ class BLETxModulationTest:
         if do_mod: suites_info.append("TX调制")
         if do_pow: suites_info.append("TX功率")
         self._log(f"开始 BLE TX 全信道测试，套件：{'/'.join(suites_info) or '无'}，"
-                  f"信道：{self.channel_start}~{self.channel_end}")
+                  f"信道：{channels[0]}~{channels[-1]} ({len(channels)} 个)")
+
+        # 所有测量项 key（用于实时判定）
+        all_keys = set()
+        if do_mod: all_keys |= self.enabled_mod_items
+        if do_pow: all_keys |= self.enabled_pow_items
 
         # 每信道结果暂存 {channel: dict}
         channel_results = {ch: {
             "channel":   ch,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         } for ch in channels}
+
+        # ---- 建立 BLE 信令连接（公共前置步骤） ----
+        if (do_mod or do_pow) and not self.is_stopped:
+            try:
+                self._setup_ble_signaling()
+            except Exception as e:
+                self._log(f"BLE 信令连接失败：{e}")
+                self.is_running = False
+                return self.results
 
         # ---- 阶段1：TX 调制测量 ----
         if do_mod and not self.is_stopped:
@@ -275,16 +454,19 @@ class BLETxModulationTest:
                     break
                 self._log(f"[调制] Channel {ch} ...")
                 try:
-                    data = self._measure_channel_items(ch, MODULATION_ITEMS, self.enabled_mod_items)
+                    data = self._measure_mod_channel(ch)
                     channel_results[ch].update(data)
                 except Exception as e:
                     self._log(f"[调制] Channel {ch} 失败：{e}")
                     channel_results[ch]["error_mod"] = str(e)
-                # 进度：调制阶段占前半（do_pow 时）或全程
+                # 实时输出（若仅调制测试，此时即可判定；若还有功率，先输出部分结果）
+                if not do_pow:
+                    self._emit_channel_result(ch, channel_results, all_keys)
                 step = idx + 1
                 total_steps = total_channels * (2 if do_pow else 1)
                 if self.progress_callback:
                     self.progress_callback(step, total_steps)
+            self.cmw500.send_command("STOP:BLU:MEAS:MEV")
 
         # ---- 阶段2：TX 功率测量 ----
         if do_pow and not self.is_stopped:
@@ -298,32 +480,19 @@ class BLETxModulationTest:
                     break
                 self._log(f"[功率] Channel {ch} ...")
                 try:
-                    data = self._measure_channel_items(ch, POWER_ITEMS, self.enabled_pow_items)
+                    data = self._measure_power_channel(ch)
                     channel_results[ch].update(data)
                 except Exception as e:
                     self._log(f"[功率] Channel {ch} 失败：{e}")
                     channel_results[ch]["error_pow"] = str(e)
+                # 功率测完即可输出完整结果
+                self._emit_channel_result(ch, channel_results, all_keys)
                 if self.progress_callback:
                     self.progress_callback(offset + idx + 1, total_steps)
+            self.cmw500.send_command("STOP:BLU:MEAS:MEV")
 
-        # ---- 汇总结果 ----
-        all_keys = set()
-        if do_mod: all_keys |= self.enabled_mod_items
-        if do_pow: all_keys |= self.enabled_pow_items
-
-        for ch in channels:
-            r = channel_results[ch]
-            measurements = {k: r.get(k) for k in all_keys}
-            r["pass_fail"] = self._judge_pass_fail(measurements)
-
-            # 简要日志
-            pf = r["pass_fail"]
-            pass_cnt = sum(1 for v in pf.values() if v == "PASS")
-            self._log(f"Channel {ch}: {pass_cnt}/{len(pf)} 项通过")
-
-            self.results.append(r)
-            if self.result_callback:
-                self.result_callback(ch, r)
+        # ---- 汇总 ----
+        self.results = [channel_results[ch] for ch in channels]
 
         self.is_running = False
         if not self.is_stopped:
@@ -362,13 +531,14 @@ class BLERxPerTest:
       - CMW500 自己统计 PER，程序按阶梯降功率找到灵敏度点。
     """
 
-    def __init__(self, cmw500, config):
+    def __init__(self, cmw500, config, channels=None):
         """
         初始化 RX PER 测试执行器
 
         参数:
             cmw500: CMW500Connection 实例（已建立连接）
             config: 从 config.yaml 加载的配置字典
+            channels: 要测试的信道列表，None 时使用 channel_start/channel_end
         """
         self.cmw500 = cmw500
         self.config = config
@@ -378,6 +548,7 @@ class BLERxPerTest:
 
         self.channel_start = self.test_params["channel_start"]
         self.channel_end   = self.test_params["channel_end"]
+        self.channels = channels
 
         # 测试运行状态
         self.is_running = False
@@ -443,11 +614,12 @@ class BLERxPerTest:
     # ============================================================
 
     def configure_instrument_rx(self):
-        """配置 CMW500 为 BLE Signaling Loopback 模式"""
+        """配置 CMW500 为 BLE Signaling Loopback 模式（对齐 CMWrun 参考序列）"""
         self._log("配置 CMW500 → BLE Signaling Loopback 模式...")
 
         # 复位
-        self.cmw500.send_command("SYST:RES:ALL; *OPC?")
+        self.cmw500.send_command("SYST:RES:ALL")
+        self.cmw500.query("*OPC?")
         time.sleep(1)
 
         # 路由配置
@@ -455,19 +627,27 @@ class BLERxPerTest:
         self.cmw500.send_command("ROUT:BLU:SIGN:SCEN:OTRX RF1C,RX1,RF1C,TX1")
         self.cmw500.send_command("SYST:BASE:REF:FREQ:SOUR INT")
 
-        # 打开蓝牙信令
-        self.cmw500.send_command("CONF:BLU:SIGN:RFSettings:EATT:OUTP 0")
-        self.cmw500.send_command("CONF:BLU:SIGN:RFSettings:EATT:INP 1")
+        # 下发 RF 功率补偿（默认 0 dB，用户可在 DUT 设置中按实际衰减调整）
+        rf_settings = self.dut_cfg.get("rf_settings", {})
+        att_output = rf_settings.get("att_output",
+                     rf_settings.get("ext_att_output", 0.0))
+        att_input  = rf_settings.get("att_input",
+                     rf_settings.get("ext_att_input",  0.0))
+        self.cmw500.send_command(f"CONF:BLU:SIGN:RFSettings:EATT:OUTP {att_output:.1f}")
+        self.cmw500.send_command(f"CONF:BLU:SIGN:RFSettings:EATT:INP {att_input:.1f}")
+
+        # RF Settings（对齐 CMWrun Config 参考序列）
         self.cmw500.send_command("CONF:BLU:SIGN:RFSettings:LEVel 0")
         self.cmw500.send_command("CONF:BLU:SIGN:RFSettings:ENPower 10")
         self.cmw500.send_command("CONF:BLU:SIGN:RFSettings:ARANging ON")
 
+        # 开启信令并等待就绪
         self.cmw500.send_command("SOUR:BLU:SIGN:STATe ON")
         state = self._wait_for_state("SOUR:BLU:SIGN:STATe?", ["ON"], timeout_ms=30000)
         if state != "ON":
             raise RuntimeError("蓝牙信令模块未能正常启动")
 
-        # 连接参数
+        # 连接参数（对齐 CMWrun Config 参考序列顺序：BTYP → PHY → CHAN:DTM → PLEN → PATT）
         phy = self.rx_cfg.get("phy_type", "LE1M")
         pkt_type = self.rx_cfg.get("packet_type", "PRBS9")
         payload_len = self.rx_cfg.get("payload_length", 37)
@@ -475,8 +655,8 @@ class BLERxPerTest:
         self.cmw500.send_command("CONF:BLU:SIGN:CONN:BTYP LE")
         self.cmw500.send_command(f"CONF:BLU:SIGN:CONN:PHY:LEN {phy}")
         self.cmw500.send_command("CONF:BLU:SIGN:RFSettings:CHAN:DTMode 0")
-        self.cmw500.send_command(f"CONF:BLU:SIGN:CONN:PACK:PLEN:LEN:LE1M {payload_len}")
-        self.cmw500.send_command(f'CONF:BLU:SIGN:CONN:PACK:PATT:LEN:LE1M {pkt_type}')
+        self.cmw500.send_command(f"CONF:BLU:SIGN:CONN:PACK:PLEN:LEN:{phy} {payload_len}")
+        self.cmw500.send_command(f"CONF:BLU:SIGN:CONN:PACK:PATT:LEN:{phy} {pkt_type}")
 
         # DUT 通信接口（从 dut_connection 配置读取）
         hw_if = self.dut_cfg.get("hw_interface", "RS232")
@@ -487,8 +667,10 @@ class BLERxPerTest:
 
         if hw_if == "RS232":
             rs232 = self.dut_cfg.get("rs232", {})
+            # 优先使用 dut_cfg 中保存的 CMW 端口索引，否则回退到 0
+            port_index = rs232.get("cmw_port_index", 0)
             self.cmw500.send_command("CONF:BLU:SIGN:COMSettings:PORTs:CATalog?")
-            self.cmw500.send_command(f"CONF:BLU:SIGN:COMSettings:COMPort 0")
+            self.cmw500.send_command(f"CONF:BLU:SIGN:COMSettings:COMPort {port_index}")
             baud = rs232.get("baud_rate", 115200)
             baud_map = {9600: "B9K6", 19200: "B19K", 38400: "B38K4",
                         57600: "B57K6", 115200: "B115K"}
@@ -503,7 +685,13 @@ class BLERxPerTest:
     def ensure_connection(self):
         """确保 CMW500 与 DUT 建立 BLE 连接"""
         self._log("检查 BLE 连接状态...")
-        state = self.cmw500.query("CALL:BLU:SIGN:CONN:CHECk:LEN?").strip()
+        # 冷启动时 DUT 可能需要更长时间响应，临时放宽单次查询超时
+        original_timeout = self.cmw500.instrument.timeout
+        try:
+            self.cmw500.instrument.timeout = 20000  # 20s
+            state = self.cmw500.query("CALL:BLU:SIGN:CONN:CHECk:LEN?").strip()
+        finally:
+            self.cmw500.instrument.timeout = original_timeout
         if state.upper() != "PASS":
             raise RuntimeError(f"BLE 连接检查失败：{state}，请确认 DUT 已上电并进入测试模式")
         self._log("BLE 连接正常")
@@ -513,36 +701,37 @@ class BLERxPerTest:
     # ============================================================
 
     def configure_rx_quality(self):
-        """配置 RX Quality 测试参数"""
+        """配置 RX Quality 测试参数（对齐 CMWrun 参考序列）"""
         phy = self.rx_cfg.get("phy_type", "LE1M")
         threshold = self.rx_cfg.get("per_threshold", 30.8)
         packet_count = self.rx_cfg.get("packet_count", 1500)
         timeout_s = self.rx_cfg.get("measurement_timeout", 20)
 
+        # RX Quality 参数
         self.cmw500.send_command(f"CONF:BLU:SIGN:RXQuality:LIMit:MPER:LEN:{phy} {threshold}")
         self.cmw500.send_command(f"CONF:BLU:SIGN:RXQuality:RINTegrity:LEN:{phy} OFF")
         self.cmw500.send_command(f"CONF:BLU:SIGN:RXQuality:PACK:LEN:{phy} {packet_count}")
 
-        # 关闭 Dirty Transmitter 相关设置
+        # Dirty Transmitter 单项关闭
         self.cmw500.send_command(f"CONF:BLU:SIGN:RFSettings:DTX:SING:MINDex:LEN:{phy} OFF")
         self.cmw500.send_command(f"CONF:BLU:SIGN:RFSettings:DTX:SING:FOFFset:LEN:{phy} OFF")
         self.cmw500.send_command(f"CONF:BLU:SIGN:RFSettings:DTX:SING:STERror:LEN:{phy} OFF")
         self.cmw500.send_command(f"CONF:BLU:SIGN:RFSettings:DTX:SING:FDRift:LEN:{phy} OFF")
         self.cmw500.send_command("CONF:BLU:SIGN:RFSettings:DTX OFF")
 
+        # 超时
         self.cmw500.send_command(f"CONF:BLU:SIGN:RXQuality:TOUT {timeout_s}")
 
+        self._log("RX Quality 参数配置完成")
+
     def set_channel(self, channel):
-        """设置测试信道（通过频率）"""
-        freq_hz = self.channel_to_freq_hz(channel)
-        self.cmw500.send_command(f"CONF:BLU:SIGN:RFSettings:FREQ:DTM {freq_hz}")
-        self._log(f"[RX PER] 切换到 Channel {channel} ({freq_hz/1e6:.3f} MHz)")
+        """设置测试信道（使用 CHAN:DTM，与 TX 功率测试保持一致）"""
+        self.cmw500.send_command(f"CONF:BLU:SIGN:RFSettings:CHAN:DTM {channel}")
+        self._log(f"[RX PER] 切换到 Channel {channel}")
 
     def set_power(self, power_dbm):
-        """设置 CMW500 发射功率"""
-        exp_pow = self.rx_cfg.get("exp_nom_pow", 10.0)
+        """设置 CMW500 发射功率（仅改 LEVel，ENPower 已在初始化时配置）"""
         self.cmw500.send_command(f"CONF:BLU:SIGN:RFSettings:LEVel {power_dbm:.2f}")
-        self.cmw500.send_command(f"CONF:BLU:SIGN:RFSettings:ENPower {exp_pow:.2f}")
 
     def _measure_per_at_power(self, channel, power):
         """
@@ -553,25 +742,31 @@ class BLERxPerTest:
         """
         # Demo 模式：生成模拟 PER 曲线，仅用于界面验证
         if self.rx_cfg.get("demo_mode", False):
-            expected = self.rx_cfg.get("expected_sensitivity", -95.0)
-            if power > expected + 3:
+            reference = -95.0  # 演示参考灵敏度，不写入配置
+            if power > reference + 3:
                 base = 0.0
-            elif power < expected - 5:
+            elif power < reference - 5:
                 base = 100.0
             else:
-                base = ((expected + 3 - power) / 8.0) * 100.0
+                base = ((reference + 3 - power) / 8.0) * 100.0
             per = min(100.0, max(0.0, base + random.uniform(-3, 3)))
             packet_count = self.rx_cfg.get("packet_count", 1500)
             rx_count = int(packet_count * (1 - per / 100.0))
             return round(per, 2), rx_count, packet_count
 
         self.set_power(power)
+        # 功率改变后稍等仪器稳定，再启动测量
+        time.sleep(0.2)
 
-        # 确保测量状态为 OFF 后再启动
-        self.cmw500.query("FETCH:BLU:SIGN:RXQuality:PER:STATe?")
+        # 先读取当前 PER 测量状态，清理可能残留的测量句柄/错误状态
+        # （该查询本身即可将未完成的测量状态带出，避免 INIT 后无法进入 RDY）
+        try:
+            self.cmw500.query("FETC:BLU:SIGN:RXQ:PER:STAT?")
+        except pyvisa.VisaIOError:
+            pass
 
-        # 启动 RX Quality 测量
-        self.cmw500.send_command("INIT:BLU:SIGN:RXQuality:PER")
+        # 启动 RX Quality 测量（必须使用短形式 INIT:BLU:SIGN:RXQ:PER）
+        self.cmw500.send_command("INIT:BLU:SIGN:RXQ:PER")
 
         # 等待测量完成（RDY）
         state = self._wait_for_state(
@@ -620,7 +815,7 @@ class BLERxPerTest:
 
         self.set_channel(channel)
         self.configure_rx_quality()
-        self.ensure_connection()
+        # BLE 连接在 Signaling 模式下跨信道保持，无需每次切换都检查
 
         self._log(f"[RX PER] Ch{channel} 搜索：{start:.1f} dBm → {end:.1f} dBm，步进 {step:.1f} dBm，阈值 {threshold}%")
 
@@ -657,14 +852,6 @@ class BLERxPerTest:
             "last_per":        last_per,
         }
 
-        expected = self.rx_cfg.get("expected_sensitivity")
-        if sensitivity is None:
-            result["pass_fail"] = "FAIL"
-        elif expected is None:
-            result["pass_fail"] = "--"
-        else:
-            result["pass_fail"] = "PASS" if sensitivity <= expected else "FAIL"
-
         return result
 
     # ============================================================
@@ -679,10 +866,10 @@ class BLERxPerTest:
         self.is_stopped = False
         self.results = []
 
-        channels = list(range(self.channel_start, self.channel_end + 1))
+        channels = self.channels if self.channels else list(range(self.channel_start, self.channel_end + 1))
         total_channels = len(channels)
 
-        self._log(f"开始 BLE RX PER 全信道灵敏度搜索，信道：{self.channel_start}~{self.channel_end}")
+        self._log(f"开始 BLE RX PER 全信道灵敏度搜索，信道：{channels[0]}~{channels[-1]} ({len(channels)} 个)")
 
         self.configure_instrument_rx()
         self.ensure_connection()
@@ -696,8 +883,7 @@ class BLERxPerTest:
             self.results.append(result)
 
             sens = result.get("sensitivity")
-            verdict = result.get("pass_fail", "--")
-            self._log(f"[RX PER] Ch{ch} 灵敏度：{sens if sens is not None else '未找到'} dBm，判定：{verdict}")
+            self._log(f"[RX PER] Ch{ch} 灵敏度：{sens if sens is not None else '未找到'} dBm")
 
             if self.result_callback:
                 self.result_callback(ch, result)

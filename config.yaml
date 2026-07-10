@@ -55,6 +55,11 @@ dut_connection:
     pattern_type: "PRBS9"
     payload_length: 37
 
+  # RF 功率补偿（CMW500 Signaling 模式）
+  rf_settings:
+    att_output: 0.0   # RF Output 补偿 (dB) → EATT:OUTP
+    att_input: 0.0    # RF Input 补偿 (dB) → EATT:INP
+
 # 蓝牙 BLE TX 自动化测试参数
 test_params:
   # 测试标准：蓝牙低功耗 (Bluetooth Low Energy)
@@ -72,19 +77,25 @@ test_params:
   channel_start: 0
   channel_end: 39
 
+  # 各测试套件独立信道选择（默认全选 0~39）
+  selected_channels:
+    tx_power: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
+    rx_per: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
+    tx_modulation: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
+
   # ============================================================
   # 测试套件选择
   # enabled: true 表示该套件默认勾选执行
   # ============================================================
   test_suites:
-    tx_modulation:
-      name: "TX 调制测试"
-      enabled: true
     tx_power:
       name: "TX 功率测试"
       enabled: true
     rx_per:
       name: "RX PER 测试"
+      enabled: false
+    tx_modulation:
+      name: "TX 调制测试"
       enabled: false
 
   # ============================================================
@@ -151,17 +162,11 @@ test_params:
     average_power:
       name: "Average Power"
       unit: "dBm"
-      upper_limit: 10.00
-      lower_limit: -20.00
-      enabled: true
-    peak_power:
-      name: "Peak Power"
-      unit: "dBm"
       upper_limit: null
       lower_limit: null
       enabled: true
-    leakage_power:
-      name: "Leakage Power"
+    peak_power:
+      name: "Peak Power"
       unit: "dBm"
       upper_limit: null
       lower_limit: null
@@ -196,8 +201,6 @@ test_params:
     packet_type: "PRBS9"
     # Payload 长度（bytes）
     payload_length: 37
-    # 期望灵敏度（dBm），用于 PASS/FAIL 判定（如无限值可设为 null）
-    expected_sensitivity: -95.0
     # 演示模式：true 时在没有真实 DUT 通信的情况下模拟 PER 曲线（仅用于界面验证）
     demo_mode: false
 
@@ -234,4 +237,4 @@ export:
   # 测试结果保存目录
   output_dir: "./test_results"
   # Excel 文件名前缀
-  file_prefix: "BLE_TX_Modulation_Test"
+  file_prefix: "CMW500_BLE_Test"
